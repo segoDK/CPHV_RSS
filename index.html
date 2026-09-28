@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Semantic Network Explorer</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/cytoscape@3.34.3/dist/cytoscape.min.js"></script>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Semantic Network Explorer</h1>
+    <p>Explore the semantic relationships in the network. Click a node to inspect its source text.</p>
+  </div>
+  <div class="stats" id="stats"></div>
+</header>
+
+<main>
+  <aside class="controls">
+    <section>
+      <h2>Appearance</h2>
+      <label>Color by
+        <select id="colorBy"></select>
+      </label>
+      <label>Size by
+        <select id="sizeBy"></select>
+      </label>
+      <label>Layout
+        <select id="layout">
+          <option value="preset">Original coordinates</option>
+          <option value="cose">Force-directed</option>
+          <option value="circle">Circle</option>
+          <option value="grid">Grid</option>
+        </select>
+      </label>
+      <label>Node size <input id="sizeScale" type="range" min="0.5" max="2.5" step="0.1" value="1"></label>
+      <label>Edge opacity <input id="edgeOpacity" type="range" min="0.05" max="1" step="0.05" value="0.35"></label>
+    </section>
+
+    <section>
+      <h2>Filter</h2>
+      <label>Search text
+        <input id="search" type="search" placeholder="Question, answer, ID…">
+      </label>
+      <label>Minimum degree
+        <input id="minDegree" type="range" min="0" max="20" value="0">
+        <span id="degreeValue">0</span>
+      </label>
+      <button id="resetFilters">Reset filters</button>
+    </section>
+
+    <section>
+      <h2>Actions</h2>
+      <button id="fit">Fit network</button>
+      <button id="resetStyle">Reset appearance</button>
+      <button id="downloadPng">Export PNG</button>
+    </section>
+
+    <section class="legend-section">
+      <h2>Legend</h2>
+      <div id="legend"></div>
+    </section>
+
+    <footer>
+      <small>Prototype built with Cytoscape.js.</small>
+    </footer>
+  </aside>
+
+  <section class="graph-wrap">
+    <div id="cy"></div>
+    <div class="loading" id="loading">Loading network…</div>
+  </section>
+
+  <aside class="inspector" id="inspector">
+    <div class="inspector-empty">
+      <div class="big-icon">◉</div>
+      <h2>Inspect a node</h2>
+      <p>Click a node in the network to see its question, answer, metadata, and local connections.</p>
+    </div>
+  </aside>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
