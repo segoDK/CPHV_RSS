@@ -1,26 +1,72 @@
-# Semantic Network Explorer v3
+# Semantic Network Explorer V8
 
-## What changed
-- Uses the corrected GraphML as the source.
-- Initial view uses the GraphML's original x/y positions. No automatic alternate layout is used.
-- Random node is inspected on startup without recentering the map.
-- Hover inspects without recentering; click inspects and centres.
+# Semantic Network Explorer V8
+
+Interactive semantic-network explorer using the corrected GraphML.
+
+## V8 features
+- Original GraphML x/y layout is the default.
+- Hover to inspect without recentering; click to inspect and centre.
 - Strong selected-node highlighting.
-- Answer is the primary highlighted content in the inspector.
-- Source sheet and combined text are omitted from the web interface.
-- Village and date are first in the inspector's attributes.
-- Village, date, question and network metrics can drive colour.
-- Timeline progressively filters the network through the available survey dates and can play automatically.
+- Answer-first inspector.
+- Village and date are first in Network attributes.
 - Village filtering.
+- Colour by Village, Date, Question, Modularity Class, and network metrics.
 - Larger node-size range.
-- Movable, labelled, recolourable topic-area annotations saved in the browser.
-- Connected-node list uses short ID + answer preview.
-- Edge opacity can be zero.
+- Timeline across the actual survey waves.
+  - **Show up to selected date** progressively reveals the network.
+  - **Show only selected date** isolates one survey wave.
+  - **Play timeline** automatically advances through the waves.
+- Free-form polygon topic areas with 3+ corners.
+  - Add or remove corners.
+  - Drag individual corners to shape the area.
+  - Drag the polygon itself to move the whole area.
+  - Optional labels and independent colours.
+  - Annotations are saved in the browser.
+- Connected nodes use short ID + answer preview.
+- Edge opacity can be set to 0%.
 
-## Update workflow
-Keep the GraphML as the master source. To replace the data:
-`python scripts/prepare_network.py path/to/new.graphml`
-Then commit/push `data/network.json` and the site files.
+## Updating the data
+Keep the GraphML as the master source. Run:
+
+```bash
+python scripts/prepare_network.py path/to/new.graphml
+```
+
+Then commit the regenerated `data/network.json` and the site files.
 
 ## GitHub Pages
-Put index.html, app.js, style.css, data/, and scripts/ at the repository root and publish the root of the main branch.
+Put `index.html`, `app.js`, `style.css`, `data/`, and `scripts/` at the repository root and publish the root of the main branch.
+
+
+## V8 annotation fix
+- Topic areas are rendered in a dedicated SVG overlay with explicit pointer-event handling so the Add topic area control reliably produces a visible polygon.
+
+
+## V8 polygon annotations
+
+Topic areas are free-form polygons anchored to the network coordinate system.
+
+- Drag the polygon interior to move the whole area.
+- Drag individual corner handles to reshape it.
+- Add or remove corners from the annotation controls.
+- Change colour and label.
+- Toggle labels.
+- Multiple areas are supported independently.
+- Annotation geometry is stored in the browser's local storage and follows the network when it is panned or zoomed.
+
+
+## V8 annotation system
+
+The annotation feature uses one integrated SVG polygon layer tied directly to the Cytoscape graph coordinate system.
+
+- Add a topic area from the annotation controls.
+- Drag the polygon interior to move it.
+- Drag individual vertices to reshape it.
+- Add or remove vertices.
+- Use at least three vertices.
+- Edit colour and label.
+- Toggle labels.
+- Delete individual areas or clear all areas.
+- Areas remain attached to the network while panning and zooming.
+- Annotation data is stored locally in the browser.
