@@ -1,8 +1,9 @@
 let network,cy,selectedNode=null,playing=false,timer=null;
 const palette=["#386cb0","#fdb462","#7fc97f","#ef3b2c","#beaed4","#fdc086","#ffff99","#666666","#1b9e77","#d95f02","#7570b3","#e7298a","#66a61e","#e6ab02","#a6761d","#1f78b4"];
 const months={Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
-let dates=[],colorAttribute="Modularity Class",sizeAttribute="degree",areas=[],timelineMode="cumulative";
+let dates=[],colorAttribute="Modularity Class",sizeAttribute="degree",areas=[],selectedAreaId=null,timelineMode="cumulative";
 const $=id=>document.getElementById(id);
+const annotationLayer=()=>$("annotationLayer");
 const pretty=v=>({"Modularity Class":"Modularity class","weighted_degree":"Weighted degree","Betweenness Centrality":"Betweenness centrality","Closeness Centrality":"Closeness centrality","Harmonic Closeness Centrality":"Harmonic closeness","Eccentricity":"Eccentricity","Question":"Question"}[v]||v);
 
 async function init(){
@@ -37,6 +38,8 @@ async function init(){
   ],
   layout:{name:"preset",fit:true,padding:50}
  });
+ cy.on("pan zoom resize", renderAnnotations);
+ cy.on("render", renderAnnotations);
  cy.on("mouseover","node",e=>{if(e.target.hasClass("area"))return;inspectNode(e.target,false);e.target.addClass("hovered")});
  cy.on("mouseout","node",e=>{e.target.removeClass("hovered")});
  cy.on("tap","node",e=>{if(e.target.hasClass("area"))return;inspectNode(e.target,true)});
@@ -87,11 +90,86 @@ function clearInspector(){cy.elements().removeClass("faded highlighted");$("insp
 function togglePlay(){playing=!playing;$("play").textContent=playing?"❚❚ Pause timeline":"▶ Play timeline";if(!playing){clearInterval(timer);return} if(Number($("timeline").value)>=dates.length-1)$("timeline").value=0;timer=setInterval(()=>{let i=Number($("timeline").value);if(i>=dates.length-1){playing=false;clearInterval(timer);$("play").textContent="▶ Play timeline";return}$("timeline").value=i+1;updateTimeline();applyFilters()},900)}
 function resetStyle(){$("colorBy").value="Modularity Class";$("sizeBy").value="degree";$("sizeScale").value=1;$("edgeOpacity").value=.35;colorAttribute="Modularity Class";sizeAttribute="degree";updateStyle()}
 function exportPNG(){let png=cy.png({full:true,scale:2,bg:"#fbfcfe"}),a=document.createElement("a");a.href=png;a.download="semantic-network.png";a.click()}
-function addArea(){let id="area_"+Date.now(),center=cy.renderedPosition({x:cy.width()/2,y:cy.height()/2});let p=cy.pan();let zoom=cy.zoom();let pos={x:(center.x-p.x)/zoom,y:(center.y-p.y)/zoom};let n=cy.add({group:"nodes",data:{id,label:"Topic area",annotation:true},position:pos});n.addClass("area");n.style({width:300,height:180,"background-color":"#fdb462"});n.grabify();areas.push({id,label:"Topic area",color:"#fdb462",width:300,height:180});saveAreas();renderAreaList();n.on("dragfree",saveAreas)}
-function renderAreaList(){let el=$("areaList");el.innerHTML="";areas.forEach(a=>{let row=document.createElement("div");row.className="area-row";row.innerHTML=`<input class="area-color" type="color" value="${a.color}"><input class="area-label" value="${escapeHtml(a.label)}"><button class="delete-area">×</button>`;row.querySelector(".area-color").onchange=e=>{a.color=e.target.value;let n=cy.getElementById(a.id);n.style("background-color",a.color);saveAreas()};row.querySelector(".area-label").oninput=e=>{a.label=e.target.value;let n=cy.getElementById(a.id);n.data("label",a.label);saveAreas()};row.querySelector(".delete-area").onclick=()=>{cy.getElementById(a.id).remove();areas=areas.filter(x=>x.id!==a.id);saveAreas();renderAreaList()};el.appendChild(row)})}
-function saveAreas(){let vals=areas.map(a=>{let n=cy.getElementById(a.id);return {...a,position:n.position(),width:Number(n.width()),height:Number(n.height())}});localStorage.setItem("semanticAreas",JSON.stringify(vals))}
-function loadAreas(){try{areas=JSON.parse(localStorage.getItem("semanticAreas")||"[]")}catch{areas=[]}areas.forEach(a=>{let n=cy.add({group:"nodes",data:{id:a.id,label:a.label,annotation:true},position:a.position});n.addClass("area");n.style({width:a.width,height:a.height,"background-color":a.color});n.on("dragfree",saveAreas)});renderAreaList()}
-function clearAreas(){cy.nodes(".area").remove();areas=[];localStorage.removeItem("semanticAreas");renderAreaList()}
+function defaultAreaPoints(){
+ const w=cy.width(),h=cy.height(),z=cy.zoom(),pan=cy.pan();
+ const sx=(w*.5-180), sy=(h*.5-110), ex=(w*.5+180), ey=(h*.5+110);
+ return [[sx,sy],[ex,sy],[ex,ey],[sx,ey]].map(([x,y])=>({x:(x-pan.x)/z,y:(y-pan.y)/z}));
+}
+function modelToScreen(pt){const z=cy.zoom(),pan=cy.pan();return {x:pt.x*z+pan.x,y:pt.y*z+pan.y}}
+function screenToModel(x,y){const z=cy.zoom(),pan=cy.pan();return {x:(x-pan.x)/z,y:(y-pan.y)/z}}
+function areaCentroid(a){let sx=0,sy=0;a.points.forEach(p=>{sx+=p.x;sy+=p.y});return {x:sx/a.points.length,y:sy/a.points.length}}
+function addArea(){
+ if(!cy)return;
+ const id="area_"+Date.now();
+ const a={id,label:"Topic area",color:palette[areas.length%palette.length],showLabel:true,points:defaultAreaPoints()};
+ areas.push(a);selectedAreaId=id;renderAreaList();renderAnnotations();saveAreas();
+}
+function renderAreaList(){
+ const el=$("areaList"); el.innerHTML="";
+ if(!areas.length){el.innerHTML='<div class="hint">No topic areas yet.</div>';return}
+ areas.forEach(a=>{
+  const row=document.createElement("div");row.className="area-row"+(a.id===selectedAreaId?" selected":"");
+  row.innerHTML=`<button class="area-select" title="Select area">▱</button><input class="area-color" type="color" value="${a.color}"><input class="area-label" value="${escapeHtml(a.label)}" title="Topic label"><button class="delete-area">×</button>`;
+  row.querySelector('.area-select').onclick=()=>{selectedAreaId=a.id;renderAreaList();renderAnnotations()};
+  row.querySelector('.area-color').onchange=e=>{a.color=e.target.value;saveAreas();renderAnnotations()};
+  row.querySelector('.area-label').oninput=e=>{a.label=e.target.value;saveAreas();renderAnnotations()};
+  row.querySelector('.delete-area').onclick=()=>{areas=areas.filter(x=>x.id!==a.id);if(selectedAreaId===a.id)selectedAreaId=areas[0]?.id||null;saveAreas();renderAreaList();renderAnnotations()};
+  el.appendChild(row);
+  const tools=document.createElement('div');tools.className='area-tools';
+  tools.innerHTML=`<button class="add-corner">＋ Add corner</button><button class="remove-corner" ${a.points.length<=3?'disabled':''}>− Remove corner</button><label class="label-toggle"><input type="checkbox" ${a.showLabel?'checked':''}> Show label</label><span class="corner-count">${a.points.length} corners</span>`;
+  tools.querySelector('.add-corner').onclick=()=>addCorner(a.id);
+  tools.querySelector('.remove-corner').onclick=()=>removeCorner(a.id);
+  tools.querySelector('input').onchange=e=>{a.showLabel=e.target.checked;saveAreas();renderAnnotations()};
+  row.after(tools);
+ });
+}
+function addCorner(id){
+ const a=areas.find(x=>x.id===id);if(!a)return;
+ let best=0,bestLen=-1;
+ for(let i=0;i<a.points.length;i++){const p=a.points[i],q=a.points[(i+1)%a.points.length];const dx=q.x-p.x,dy=q.y-p.y,len=dx*dx+dy*dy;if(len>bestLen){bestLen=len;best=i}}
+ const p=a.points[best],q=a.points[(best+1)%a.points.length];
+ a.points.splice(best+1,0,{x:(p.x+q.x)/2,y:(p.y+q.y)/2});selectedAreaId=id;saveAreas();renderAreaList();renderAnnotations();
+}
+function removeCorner(id){
+ const a=areas.find(x=>x.id===id);if(!a||a.points.length<=3)return;
+ // Remove the vertex nearest the centroid, preserving at least a triangle.
+ const c=areaCentroid(a);let idx=0,best=Infinity;a.points.forEach((p,i)=>{const d=(p.x-c.x)**2+(p.y-c.y)**2;if(d<best){best=d;idx=i}});a.points.splice(idx,1);saveAreas();renderAreaList();renderAnnotations();
+}
+function svgEl(tag,attrs={}){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);return e}
+function renderAnnotations(){
+ const svg=annotationLayer();if(!svg||!cy)return;while(svg.firstChild)svg.removeChild(svg.firstChild);
+ svg.setAttribute('viewBox',`0 0 ${cy.width()} ${cy.height()}`);
+ areas.forEach(a=>{
+  const g=svgEl('g',{class:'annotation-group'+(a.id===selectedAreaId?' selected':'')});
+  const pts=a.points.map(modelToScreen);const poly=svgEl('polygon',{class:'annotation-polygon',points:pts.map(p=>`${p.x},${p.y}`).join(' '),fill:a.color,'fill-opacity':'0.16',stroke:a.color});
+  poly.addEventListener('pointerdown',e=>startAreaDrag(e,a.id));
+  poly.addEventListener('click',e=>{e.stopPropagation();selectedAreaId=a.id;renderAreaList();renderAnnotations()});
+  g.appendChild(poly);
+  if(a.showLabel){const c=modelToScreen(areaCentroid(a));const t=svgEl('text',{class:'annotation-label',x:c.x,y:c.y,'text-anchor':'middle','dominant-baseline':'middle'});t.textContent=a.label||'';g.appendChild(t)}
+  pts.forEach((p,i)=>{
+   const h=svgEl('circle',{class:'annotation-handle',cx:p.x,cy:p.y,r:7});
+   h.addEventListener('pointerdown',e=>startHandleDrag(e,a.id,i));
+   g.appendChild(h);
+  });
+  svg.appendChild(g);
+ });
+}
+function startHandleDrag(e,id,index){
+ e.preventDefault();e.stopPropagation();const a=areas.find(x=>x.id===id);if(!a)return;selectedAreaId=id;renderAreaList();
+ const move=ev=>{const r=annotationLayer().getBoundingClientRect();const p=screenToModel(ev.clientX-r.left,ev.clientY-r.top);a.points[index]=p;renderAnnotations()};
+ const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);saveAreas()};
+ window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+}
+function startAreaDrag(e,id){
+ e.preventDefault();e.stopPropagation();const a=areas.find(x=>x.id===id);if(!a)return;selectedAreaId=id;renderAreaList();
+ const r=annotationLayer().getBoundingClientRect(),start=screenToModel(e.clientX-r.left,e.clientY-r.top);const original=a.points.map(p=>({...p}));
+ const move=ev=>{const rr=annotationLayer().getBoundingClientRect(),now=screenToModel(ev.clientX-rr.left,ev.clientY-rr.top),dx=now.x-start.x,dy=now.y-start.y;a.points=a.points.map((p,i)=>({x:original[i].x+dx,y:original[i].y+dy}));renderAnnotations()};
+ const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);saveAreas()};
+ window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
+}
+function saveAreas(){localStorage.setItem('semanticAreas',JSON.stringify(areas))}
+function loadAreas(){try{areas=JSON.parse(localStorage.getItem('semanticAreas')||'[]')}catch{areas=[]}areas=areas.filter(a=>Array.isArray(a.points)&&a.points.length>=3);selectedAreaId=areas[0]?.id||null;renderAreaList();renderAnnotations()}
+function clearAreas(){areas=[];selectedAreaId=null;localStorage.removeItem('semanticAreas');renderAreaList();renderAnnotations()}
 function renderLegend(){let e=$("legend");if(colorAttribute==="Village"){let vals=[...new Set(network.nodes.map(n=>n.Village))].sort();e.innerHTML=vals.map((v,i)=>`<div class="legend-item"><span class="swatch" style="background:${palette[i%palette.length]}"></span>${escapeHtml(v)}</div>`).join("")}else if(colorAttribute==="Question"){let vals=[...new Set(network.nodes.map(n=>n.Question))];e.innerHTML=vals.map((v,i)=>`<div class="legend-item"><span class="swatch" style="background:${palette[i%palette.length]}"></span>${escapeHtml(truncate(v,38))}</div>`).join("")}else if(colorAttribute==="Modularity Class"){e.innerHTML=palette.slice(0,8).map((c,i)=>`<div class="legend-item"><span class="swatch" style="background:${c}"></span>Community ${i}</div>`).join("")}else e.innerHTML="<div class='legend-item'>Colour scale / categorical colours shown on nodes.</div>"}
 function truncate(s,n){s=String(s);return s.length>n?s.slice(0,n-1)+"…":s}
 function escapeHtml(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}

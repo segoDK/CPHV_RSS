@@ -1,8 +1,8 @@
-# Semantic Network Explorer v4
+# Semantic Network Explorer v5
 
 Interactive semantic-network explorer using the corrected GraphML.
 
-## v4 features
+## v5 features
 - Original GraphML x/y layout is the default.
 - Hover to inspect without recentering; click to inspect and centre.
 - Strong selected-node highlighting.
@@ -15,7 +15,12 @@ Interactive semantic-network explorer using the corrected GraphML.
   - **Show up to selected date** progressively reveals the network.
   - **Show only selected date** isolates one survey wave.
   - **Play timeline** automatically advances through the waves.
-- Movable, labelled, recolourable topic areas saved in the browser.
+- Free-form polygon topic areas with 3+ corners.
+  - Add or remove corners.
+  - Drag individual corners to shape the area.
+  - Drag the polygon itself to move the whole area.
+  - Optional labels and independent colours.
+  - Annotations are saved in the browser.
 - Connected nodes use short ID + answer preview.
 - Edge opacity can be set to 0%.
 
