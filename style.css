@@ -29,3 +29,51 @@
 .area-item button { width: auto; display: inline-block; margin: 2px 2px 0 0; padding: 5px 7px; font-size: 11px; }
 .area-show { display:inline-block; margin:4px 0 0; font-size:11px; }
 .area-count { display:block; color:var(--muted); font-size:10px; margin-top:4px; }
+
+/* V8 annotation UI */
+#annotationLayer {
+  pointer-events: none;
+  overflow: visible;
+}
+.annotation-panel {
+  margin-top: 12px;
+}
+.area-item {
+  border: 1px solid var(--border, #d7dbe2);
+  border-radius: 8px;
+  padding: 8px;
+  margin: 7px 0;
+  background: #fafbfc;
+}
+.area-item.selected {
+  border-color: #718096;
+  box-shadow: 0 0 0 2px rgba(49,94,251,.10);
+}
+.area-label {
+  width: calc(100% - 38px);
+  margin-right: 4px;
+}
+.area-color {
+  width: 28px;
+  height: 28px;
+  padding: 1px;
+  vertical-align: middle;
+}
+.area-actions button {
+  width: auto;
+  display: inline-block;
+  margin: 5px 3px 0 0;
+  padding: 5px 7px;
+  font-size: 11px;
+}
+.area-show {
+  display: block;
+  margin-top: 5px;
+  font-size: 11px;
+}
+.area-count {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted, #6b7280);
+}

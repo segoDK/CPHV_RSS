@@ -176,209 +176,471 @@ function escapeHtml(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
 init().catch(e=>{console.error(e);$("loading").textContent="Could not load the network. See the browser console."});
 
 
-/* V7 annotation system: editable SVG polygons anchored to Cytoscape graph coordinates.
-   This layer deliberately lives above Cytoscape and stores polygon points in graph space. */
-(function(){
-  const A = {
-    items: [],
-    selected: null,
-    drag: null,
-    uid: 1,
-    svg: null,
-    layer: null,
-    handles: null,
-    labels: null
+/* ============================================================
+   V8 ANNOTATION SYSTEM
+   One authoritative SVG polygon layer, anchored to Cytoscape
+   model coordinates. No window.cy dependency.
+   ============================================================ */
+const annotationState = {
+  items: [],
+  selectedId: null,
+  drag: null
+};
+
+function annotationStorageKey() {
+  return "semantic-network-explorer-annotations-v8";
+}
+
+function loadAnnotations() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(annotationStorageKey()) || "[]");
+    annotationState.items = Array.isArray(saved) ? saved : [];
+  } catch (e) {
+    annotationState.items = [];
+  }
+}
+
+function saveAnnotations() {
+  localStorage.setItem(
+    annotationStorageKey(),
+    JSON.stringify(annotationState.items)
+  );
+}
+
+function annotationSvg() {
+  return document.getElementById("annotationLayer");
+}
+
+function graphToAnnotationScreen(point) {
+  const rendered = cy.renderedPosition({ x: point.x, y: point.y });
+  return { x: rendered.x, y: rendered.y };
+}
+
+function annotationScreenToGraph(clientX, clientY) {
+  const svg = annotationSvg();
+  const rect = svg.getBoundingClientRect();
+  const renderedX = clientX - rect.left;
+  const renderedY = clientY - rect.top;
+  const pan = cy.pan();
+  const zoom = cy.zoom();
+
+  return {
+    x: (renderedX - pan.x) / zoom,
+    y: (renderedY - pan.y) / zoom
   };
+}
 
-  function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-  function storageKey(){ return "semantic-network-annotations-v7"; }
-  function load(){
-    try { A.items = JSON.parse(localStorage.getItem(storageKey()) || "[]"); } catch(e){ A.items=[]; }
-    A.items.forEach(x=>{ if(!x.id) x.id="a"+(A.uid++); if(!x.color) x.color="#f59e0b"; if(!x.label) x.label="Topic area"; });
+function annotationPointString(points) {
+  return points.map(p => {
+    const q = graphToAnnotationScreen(p);
+    return `${q.x},${q.y}`;
+  }).join(" ");
+}
+
+function selectedAnnotation() {
+  return annotationState.items.find(
+    item => item.id === annotationState.selectedId
+  ) || null;
+}
+
+function annotationCentre(item) {
+  const sum = item.points.reduce(
+    (acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }),
+    { x: 0, y: 0 }
+  );
+  return {
+    x: sum.x / item.points.length,
+    y: sum.y / item.points.length
+  };
+}
+
+function renderAnnotations() {
+  const svg = annotationSvg();
+  if (!svg || !cy) return;
+
+  let layer = svg.querySelector(".annotation-layer");
+  if (!layer) {
+    layer = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    layer.setAttribute("class", "annotation-layer");
+    svg.appendChild(layer);
   }
-  function save(){ localStorage.setItem(storageKey(), JSON.stringify(A.items)); }
 
-  function ensureSvg(){
-    A.svg = document.getElementById("annotationLayer");
-    if(!A.svg) return;
-    A.svg.setAttribute("width","100%");
-    A.svg.setAttribute("height","100%");
-    A.svg.style.position="absolute";
-    A.svg.style.inset="0";
-    A.svg.style.width="100%";
-    A.svg.style.height="100%";
-    A.svg.style.pointerEvents="none";
-    A.svg.style.zIndex="4";
-    A.svg.innerHTML="";
-    A.layer=document.createElementNS("http://www.w3.org/2000/svg","g");
-    A.layer.setAttribute("class","annotation-layer");
-    A.svg.appendChild(A.layer);
-  }
+  layer.innerHTML = "";
 
-  function graphToScreen(p){
-    const r=cy.renderedPosition({x:p.x,y:p.y});
-    return {x:r.x,y:r.y};
-  }
-  function screenToGraph(x,y){
-    const p=cy.pan(), z=cy.zoom();
-    return {x:(x-p.x)/z, y:(y-p.y)/z};
-  }
-  function pointsStr(points){ return points.map(p=>{let q=graphToScreen(p);return q.x+","+q.y}).join(" "); }
+  annotationState.items.forEach(item => {
+    const group = document.createElementNS(
+      "http://www.w3.org/2000/svg", "g"
+    );
+    group.dataset.annotationId = item.id;
 
-  function selected(){ return A.items.find(x=>x.id===A.selected); }
+    const polygon = document.createElementNS(
+      "http://www.w3.org/2000/svg", "polygon"
+    );
 
-  function draw(){
-    if(!A.layer || !cy) return;
-    A.layer.innerHTML="";
-    A.items.forEach(item=>{
-      const g=document.createElementNS("http://www.w3.org/2000/svg","g");
-      g.dataset.id=item.id;
+    polygon.setAttribute("points", annotationPointString(item.points));
+    polygon.setAttribute("fill", item.color);
+    polygon.setAttribute(
+      "fill-opacity",
+      item.id === annotationState.selectedId ? "0.22" : "0.12"
+    );
+    polygon.setAttribute("stroke", item.color);
+    polygon.setAttribute(
+      "stroke-width",
+      item.id === annotationState.selectedId ? "3" : "2"
+    );
+    polygon.setAttribute("stroke-dasharray", "7 5");
+    polygon.style.pointerEvents = "auto";
+    polygon.style.cursor = "move";
 
-      const poly=document.createElementNS("http://www.w3.org/2000/svg","polygon");
-      poly.setAttribute("points",pointsStr(item.points));
-      poly.setAttribute("fill",item.color);
-      poly.setAttribute("fill-opacity", item.id===A.selected ? ".20" : ".12");
-      poly.setAttribute("stroke",item.color);
-      poly.setAttribute("stroke-width",item.id===A.selected ? "3" : "2");
-      poly.setAttribute("stroke-dasharray", item.id===A.selected ? "7 5" : "5 5");
-      poly.style.pointerEvents="auto";
-      poly.style.cursor="move";
-      poly.addEventListener("pointerdown",e=>beginMove(e,item));
-      g.appendChild(poly);
+    polygon.addEventListener("pointerdown", event => {
+      if (event.button !== 0) return;
 
-      if(item.showLabel !== false){
-        const cx=item.points.reduce((s,p)=>s+p.x,0)/item.points.length;
-        const cyy=item.points.reduce((s,p)=>s+p.y,0)/item.points.length;
-        const q=graphToScreen({x:cx,y:cyy});
-        const text=document.createElementNS("http://www.w3.org/2000/svg","text");
-        text.setAttribute("x",q.x); text.setAttribute("y",q.y);
-        text.setAttribute("text-anchor","middle");
-        text.setAttribute("dominant-baseline","middle");
-        text.setAttribute("font-size","14");
-        text.setAttribute("font-weight","700");
-        text.setAttribute("fill",item.color);
-        text.setAttribute("stroke","#fff");
-        text.setAttribute("stroke-width","4");
-        text.setAttribute("paint-order","stroke");
-        text.style.pointerEvents="none";
-        text.textContent=item.label;
-        g.appendChild(text);
-      }
+      annotationState.selectedId = item.id;
 
-      if(item.id===A.selected){
-        item.points.forEach((p,i)=>{
-          const q=graphToScreen(p);
-          const h=document.createElementNS("http://www.w3.org/2000/svg","circle");
-          h.setAttribute("cx",q.x); h.setAttribute("cy",q.y); h.setAttribute("r","7");
-          h.setAttribute("fill","#fff"); h.setAttribute("stroke",item.color); h.setAttribute("stroke-width","3");
-          h.style.pointerEvents="auto"; h.style.cursor="grab";
-          h.addEventListener("pointerdown",e=>beginVertex(e,item,i));
-          g.appendChild(h);
+      const start = annotationScreenToGraph(
+        event.clientX,
+        event.clientY
+      );
+
+      annotationState.drag = {
+        type: "polygon",
+        item,
+        start,
+        original: item.points.map(p => ({ ...p }))
+      };
+
+      polygon.setPointerCapture?.(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+      renderAnnotations();
+      renderAnnotationControls();
+    });
+
+    group.appendChild(polygon);
+
+    if (item.showLabel !== false) {
+      const centre = annotationCentre(item);
+      const screen = graphToAnnotationScreen(centre);
+
+      const text = document.createElementNS(
+        "http://www.w3.org/2000/svg", "text"
+      );
+
+      text.setAttribute("x", screen.x);
+      text.setAttribute("y", screen.y);
+      text.setAttribute("text-anchor", "middle");
+      text.setAttribute("dominant-baseline", "middle");
+      text.setAttribute("font-size", "14");
+      text.setAttribute("font-weight", "700");
+      text.setAttribute("fill", item.color);
+      text.setAttribute("stroke", "#ffffff");
+      text.setAttribute("stroke-width", "4");
+      text.setAttribute("paint-order", "stroke");
+      text.style.pointerEvents = "none";
+      text.textContent = item.label || "Topic area";
+
+      group.appendChild(text);
+    }
+
+    if (item.id === annotationState.selectedId) {
+      item.points.forEach((point, index) => {
+        const screen = graphToAnnotationScreen(point);
+
+        const handle = document.createElementNS(
+          "http://www.w3.org/2000/svg", "circle"
+        );
+
+        handle.setAttribute("cx", screen.x);
+        handle.setAttribute("cy", screen.y);
+        handle.setAttribute("r", "7");
+        handle.setAttribute("fill", "#ffffff");
+        handle.setAttribute("stroke", item.color);
+        handle.setAttribute("stroke-width", "3");
+        handle.style.pointerEvents = "auto";
+        handle.style.cursor = "grab";
+
+        handle.addEventListener("pointerdown", event => {
+          if (event.button !== 0) return;
+
+          annotationState.selectedId = item.id;
+          annotationState.drag = {
+            type: "vertex",
+            item,
+            index
+          };
+
+          event.preventDefault();
+          event.stopPropagation();
         });
-      }
-      A.layer.appendChild(g);
-    });
-    renderList();
-  }
 
-  function beginMove(e,item){
-    if(e.button!==0) return;
-    A.selected=item.id;
-    const q=screenToGraph(e.clientX-A.svg.getBoundingClientRect().left,e.clientY-A.svg.getBoundingClientRect().top);
-    A.drag={type:"move",item,start:q,original:item.points.map(p=>({...p}))};
-    e.preventDefault(); e.stopPropagation(); draw();
-  }
-  function beginVertex(e,item,i){
-    if(e.button!==0) return;
-    A.selected=item.id;
-    A.drag={type:"vertex",item,index:i};
-    e.preventDefault(); e.stopPropagation(); draw();
-  }
-  function pointerMove(e){
-    if(!A.drag) return;
-    const rect=A.svg.getBoundingClientRect();
-    const q=screenToGraph(e.clientX-rect.left,e.clientY-rect.top);
-    if(A.drag.type==="vertex"){
-      A.drag.item.points[A.drag.index]={x:q.x,y:q.y};
-    } else {
-      const dx=q.x-A.drag.start.x, dy=q.y-A.drag.start.y;
-      A.drag.item.points=A.drag.original.map(p=>({x:p.x+dx,y:p.y+dy}));
+        group.appendChild(handle);
+      });
     }
-    draw();
-  }
-  function pointerUp(){
-    if(A.drag){ A.drag=null; save(); renderList(); }
-  }
 
-  function add(){
-    const center=cy.renderedPosition(cy.nodes().length ? cy.nodes()[Math.floor(Math.random()*cy.nodes().length)].position() : {x:0,y:0});
-    const q=screenToGraph(center.x,center.y);
-    const s=80/cy.zoom();
-    const item={id:"a"+Date.now().toString(36),label:"Topic area",color:"#f59e0b",showLabel:true,
-      points:[{x:q.x-s,y:q.y-s*.65},{x:q.x+s,y:q.y-s*.65},{x:q.x+s*1.05,y:q.y+s*.55},{x:q.x-s*.85,y:q.y+s*.75}]};
-    A.items.push(item); A.selected=item.id; save(); draw();
-  }
+    layer.appendChild(group);
+  });
+}
 
-  function removeVertex(){
-    const item=selected();
-    if(item && item.points.length>3){ item.points.pop(); save(); draw(); }
-  }
-  function addVertex(){
-    const item=selected(); if(!item) return;
-    let best=0, bestLen=-1;
-    for(let i=0;i<item.points.length;i++){
-      const a=item.points[i],b=item.points[(i+1)%item.points.length];
-      const len=(a.x-b.x)**2+(a.y-b.y)**2;
-      if(len>bestLen){bestLen=len;best=i;}
+function addTopicArea() {
+  if (!cy) return;
+
+  const extent = cy.extent();
+  const cx = (extent.x1 + extent.x2) / 2;
+  const cyy = (extent.y1 + extent.y2) / 2;
+
+  const width = Math.max((extent.x2 - extent.x1) * 0.18, 80);
+  const height = Math.max((extent.y2 - extent.y1) * 0.14, 60);
+
+  const id = "annotation-" + Date.now();
+
+  annotationState.items.push({
+    id,
+    label: "Topic area",
+    color: "#f59e0b",
+    showLabel: true,
+    points: [
+      { x: cx - width, y: cyy - height },
+      { x: cx + width, y: cyy - height },
+      { x: cx + width * 1.1, y: cyy + height * 0.55 },
+      { x: cx - width * 0.9, y: cyy + height }
+    ]
+  });
+
+  annotationState.selectedId = id;
+  saveAnnotations();
+  renderAnnotations();
+  renderAnnotationControls();
+}
+
+function deleteSelectedAnnotation() {
+  if (!annotationState.selectedId) return;
+
+  annotationState.items = annotationState.items.filter(
+    item => item.id !== annotationState.selectedId
+  );
+
+  annotationState.selectedId = null;
+  annotationState.drag = null;
+
+  saveAnnotations();
+  renderAnnotations();
+  renderAnnotationControls();
+}
+
+function clearTopicAreas() {
+  annotationState.items = [];
+  annotationState.selectedId = null;
+  annotationState.drag = null;
+
+  saveAnnotations();
+  renderAnnotations();
+  renderAnnotationControls();
+}
+
+function addAnnotationCorner(item) {
+  if (!item) return;
+
+  let longest = 0;
+  let longestLength = -Infinity;
+
+  for (let i = 0; i < item.points.length; i++) {
+    const a = item.points[i];
+    const b = item.points[(i + 1) % item.points.length];
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    const length = dx * dx + dy * dy;
+
+    if (length > longestLength) {
+      longestLength = length;
+      longest = i;
     }
-    const a=item.points[best],b=item.points[(best+1)%item.points.length];
-    item.points.splice(best+1,0,{x:(a.x+b.x)/2,y:(a.y+b.y)/2});
-    save(); draw();
   }
-  function clear(){ A.items=[]; A.selected=null; save(); draw(); }
 
-  function renderList(){
-    const box=document.getElementById("areaList"); if(!box)return;
-    box.innerHTML=A.items.map(item=>`<div class="area-item ${item.id===A.selected?"selected":""}" data-id="${esc(item.id)}">
-      <input class="area-label" value="${esc(item.label)}" title="Label">
-      <input class="area-color" type="color" value="${esc(item.color)}" title="Colour">
-      <button class="area-select">Select</button>
-      <button class="area-add">＋ corner</button>
-      <button class="area-remove">− corner</button>
-      <button class="area-delete">Delete</button>
-      <label class="area-show"><input type="checkbox" ${item.showLabel!==false?"checked":""}> label</label>
+  const a = item.points[longest];
+  const b = item.points[(longest + 1) % item.points.length];
+
+  item.points.splice(longest + 1, 0, {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2
+  });
+
+  saveAnnotations();
+  renderAnnotations();
+  renderAnnotationControls();
+}
+
+function removeAnnotationCorner(item) {
+  if (!item || item.points.length <= 3) return;
+
+  item.points.pop();
+
+  saveAnnotations();
+  renderAnnotations();
+  renderAnnotationControls();
+}
+
+function renderAnnotationControls() {
+  const list = document.getElementById("areaList");
+  if (!list) return;
+
+  list.innerHTML = "";
+
+  annotationState.items.forEach(item => {
+    const row = document.createElement("div");
+    row.className =
+      "area-item" +
+      (item.id === annotationState.selectedId ? " selected" : "");
+
+    row.innerHTML = `
+      <input class="area-label" value="${escapeHtml(item.label || "Topic area")}">
+      <input class="area-color" type="color" value="${item.color || "#f59e0b"}">
+      <div class="area-actions">
+        <button class="area-select">Select</button>
+        <button class="area-add">＋ Corner</button>
+        <button class="area-remove">− Corner</button>
+        <button class="area-delete">Delete</button>
+      </div>
+      <label class="area-show">
+        <input type="checkbox" ${item.showLabel !== false ? "checked" : ""}>
+        Show label
+      </label>
       <span class="area-count">${item.points.length} corners</span>
-    </div>`).join("");
-    box.querySelectorAll(".area-item").forEach(row=>{
-      const item=A.items.find(x=>x.id===row.dataset.id);
-      row.querySelector(".area-select").onclick=()=>{A.selected=item.id;draw();};
-      row.querySelector(".area-add").onclick=()=>{A.selected=item.id;addVertex();};
-      row.querySelector(".area-remove").onclick=()=>{A.selected=item.id;removeVertex();};
-      row.querySelector(".area-delete").onclick=()=>{A.items=A.items.filter(x=>x.id!==item.id);if(A.selected===item.id)A.selected=null;save();draw();};
-      row.querySelector(".area-label").oninput=e=>{item.label=e.target.value;save();draw();};
-      row.querySelector(".area-color").oninput=e=>{item.color=e.target.value;save();draw();};
-      row.querySelector(".area-show input").onchange=e=>{item.showLabel=e.target.checked;save();draw();};
-    });
+    `;
+
+    row.querySelector(".area-select").onclick = () => {
+      annotationState.selectedId = item.id;
+      renderAnnotations();
+      renderAnnotationControls();
+    };
+
+    row.querySelector(".area-add").onclick = () => {
+      annotationState.selectedId = item.id;
+      addAnnotationCorner(item);
+    };
+
+    row.querySelector(".area-remove").onclick = () => {
+      annotationState.selectedId = item.id;
+      removeAnnotationCorner(item);
+    };
+
+    row.querySelector(".area-delete").onclick = () => {
+      annotationState.items = annotationState.items.filter(
+        x => x.id !== item.id
+      );
+
+      if (annotationState.selectedId === item.id) {
+        annotationState.selectedId = null;
+      }
+
+      saveAnnotations();
+      renderAnnotations();
+      renderAnnotationControls();
+    };
+
+    row.querySelector(".area-label").oninput = event => {
+      item.label = event.target.value;
+      saveAnnotations();
+      renderAnnotations();
+    };
+
+    row.querySelector(".area-color").oninput = event => {
+      item.color = event.target.value;
+      saveAnnotations();
+      renderAnnotations();
+    };
+
+    row.querySelector(".area-show input").onchange = event => {
+      item.showLabel = event.target.checked;
+      saveAnnotations();
+      renderAnnotations();
+    };
+
+    list.appendChild(row);
+  });
+}
+
+document.addEventListener("pointermove", event => {
+  const drag = annotationState.drag;
+  if (!drag || !cy) return;
+
+  if (drag.type === "vertex") {
+    const point = annotationScreenToGraph(
+      event.clientX,
+      event.clientY
+    );
+
+    drag.item.points[drag.index] = point;
+  } else if (drag.type === "polygon") {
+    const current = annotationScreenToGraph(
+      event.clientX,
+      event.clientY
+    );
+
+    const dx = current.x - drag.start.x;
+    const dy = current.y - drag.start.y;
+
+    drag.item.points = drag.original.map(point => ({
+      x: point.x + dx,
+      y: point.y + dy
+    }));
   }
 
-  function bind(){
-    ensureSvg(); load(); draw();
-    document.getElementById("addArea")?.addEventListener("click",add);
-    document.getElementById("clearAreas")?.addEventListener("click",clear);
-    document.addEventListener("pointermove",pointerMove);
-    document.addEventListener("pointerup",pointerUp);
-    cy.on("pan zoom resize",()=>draw());
-    const originalFit=cy.fit.bind(cy);
-    // redraw after common camera changes; explicit event handler above handles most cases.
-    renderList();
+  renderAnnotations();
+});
+
+document.addEventListener("pointerup", () => {
+  if (!annotationState.drag) return;
+
+  annotationState.drag = null;
+  saveAnnotations();
+  renderAnnotations();
+  renderAnnotationControls();
+});
+
+function initializeAnnotations() {
+  const svg = document.getElementById("annotationLayer");
+  if (!svg || !cy) return;
+
+  svg.style.pointerEvents = "none";
+  svg.style.position = "absolute";
+  svg.style.inset = "0";
+  svg.style.width = "100%";
+  svg.style.height = "100%";
+  svg.style.zIndex = "4";
+
+  loadAnnotations();
+  renderAnnotations();
+  renderAnnotationControls();
+
+  document.getElementById("addArea")?.addEventListener(
+    "click",
+    addTopicArea
+  );
+
+  document.getElementById("clearAreas")?.addEventListener(
+    "click",
+    clearTopicAreas
+  );
+
+  cy.on("pan zoom resize", renderAnnotations);
+}
+
+/* Call this once, after Cytoscape has been constructed. */
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[ch]));
+}
+
+(function waitForGraphForAnnotations() {
+  if (typeof cy !== "undefined" && cy && document.getElementById("annotationLayer")) {
+    initializeAnnotations();
+  } else {
+    requestAnimationFrame(waitForGraphForAnnotations);
   }
-
-  // Wait until the existing app has initialized Cytoscape.
-  const wait=setInterval(()=>{
-    if(window.cy && window.cy.container && document.getElementById("annotationLayer")){
-      clearInterval(wait); bind();
-    }
-  },100);
-
-  window.semanticAnnotationsV7={add,clear,draw};
 })();

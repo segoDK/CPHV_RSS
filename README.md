@@ -1,10 +1,10 @@
-# Semantic Network Explorer V7
+# Semantic Network Explorer V8
 
-# Semantic Network Explorer v7
+# Semantic Network Explorer V8
 
 Interactive semantic-network explorer using the corrected GraphML.
 
-## v6 features
+## V8 features
 - Original GraphML x/y layout is the default.
 - Hover to inspect without recentering; click to inspect and centre.
 - Strong selected-node highlighting.
@@ -39,11 +39,11 @@ Then commit the regenerated `data/network.json` and the site files.
 Put `index.html`, `app.js`, `style.css`, `data/`, and `scripts/` at the repository root and publish the root of the main branch.
 
 
-## v6 annotation fix
+## V8 annotation fix
 - Topic areas are rendered in a dedicated SVG overlay with explicit pointer-event handling so the Add topic area control reliably produces a visible polygon.
 
 
-## V7 polygon annotations
+## V8 polygon annotations
 
 Topic areas are free-form polygons anchored to the network coordinate system.
 
@@ -54,3 +54,19 @@ Topic areas are free-form polygons anchored to the network coordinate system.
 - Toggle labels.
 - Multiple areas are supported independently.
 - Annotation geometry is stored in the browser's local storage and follows the network when it is panned or zoomed.
+
+
+## V8 annotation system
+
+The annotation feature uses one integrated SVG polygon layer tied directly to the Cytoscape graph coordinate system.
+
+- Add a topic area from the annotation controls.
+- Drag the polygon interior to move it.
+- Drag individual vertices to reshape it.
+- Add or remove vertices.
+- Use at least three vertices.
+- Edit colour and label.
+- Toggle labels.
+- Delete individual areas or clear all areas.
+- Areas remain attached to the network while panning and zooming.
+- Annotation data is stored locally in the browser.
