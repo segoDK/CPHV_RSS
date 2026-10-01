@@ -102,7 +102,7 @@ function addArea(){
  if(!cy)return;
  const id="area_"+Date.now();
  const a={id,label:"Topic area",color:palette[areas.length%palette.length],showLabel:true,points:defaultAreaPoints()};
- areas.push(a);selectedAreaId=id;renderAreaList();renderAnnotations();saveAreas();
+ areas.push(a);selectedAreaId=id;saveAreas();renderAreaList();requestAnimationFrame(()=>renderAnnotations());
 }
 function renderAreaList(){
  const el=$("areaList"); el.innerHTML="";
@@ -138,16 +138,16 @@ function removeCorner(id){
 function svgEl(tag,attrs={}){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);return e}
 function renderAnnotations(){
  const svg=annotationLayer();if(!svg||!cy)return;while(svg.firstChild)svg.removeChild(svg.firstChild);
- svg.setAttribute('viewBox',`0 0 ${cy.width()} ${cy.height()}`);
+ const w=Math.max(1,cy.width()),h=Math.max(1,cy.height());svg.setAttribute('width',w);svg.setAttribute('height',h);svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
  areas.forEach(a=>{
-  const g=svgEl('g',{class:'annotation-group'+(a.id===selectedAreaId?' selected':'')});
+  const g=svgEl('g',{class:'annotation-group'+(a.id===selectedAreaId?' selected':'')});g.style.pointerEvents='auto';
   const pts=a.points.map(modelToScreen);const poly=svgEl('polygon',{class:'annotation-polygon',points:pts.map(p=>`${p.x},${p.y}`).join(' '),fill:a.color,'fill-opacity':'0.16',stroke:a.color});
-  poly.addEventListener('pointerdown',e=>startAreaDrag(e,a.id));
+  poly.style.pointerEvents='all';poly.addEventListener('pointerdown',e=>startAreaDrag(e,a.id));
   poly.addEventListener('click',e=>{e.stopPropagation();selectedAreaId=a.id;renderAreaList();renderAnnotations()});
   g.appendChild(poly);
   if(a.showLabel){const c=modelToScreen(areaCentroid(a));const t=svgEl('text',{class:'annotation-label',x:c.x,y:c.y,'text-anchor':'middle','dominant-baseline':'middle'});t.textContent=a.label||'';g.appendChild(t)}
   pts.forEach((p,i)=>{
-   const h=svgEl('circle',{class:'annotation-handle',cx:p.x,cy:p.y,r:7});
+   const h=svgEl('circle',{class:'annotation-handle',cx:p.x,cy:p.y,r:8});h.style.pointerEvents='all';
    h.addEventListener('pointerdown',e=>startHandleDrag(e,a.id,i));
    g.appendChild(h);
   });
@@ -174,3 +174,211 @@ function renderLegend(){let e=$("legend");if(colorAttribute==="Village"){let val
 function truncate(s,n){s=String(s);return s.length>n?s.slice(0,n-1)+"…":s}
 function escapeHtml(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 init().catch(e=>{console.error(e);$("loading").textContent="Could not load the network. See the browser console."});
+
+
+/* V7 annotation system: editable SVG polygons anchored to Cytoscape graph coordinates.
+   This layer deliberately lives above Cytoscape and stores polygon points in graph space. */
+(function(){
+  const A = {
+    items: [],
+    selected: null,
+    drag: null,
+    uid: 1,
+    svg: null,
+    layer: null,
+    handles: null,
+    labels: null
+  };
+
+  function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+  function storageKey(){ return "semantic-network-annotations-v7"; }
+  function load(){
+    try { A.items = JSON.parse(localStorage.getItem(storageKey()) || "[]"); } catch(e){ A.items=[]; }
+    A.items.forEach(x=>{ if(!x.id) x.id="a"+(A.uid++); if(!x.color) x.color="#f59e0b"; if(!x.label) x.label="Topic area"; });
+  }
+  function save(){ localStorage.setItem(storageKey(), JSON.stringify(A.items)); }
+
+  function ensureSvg(){
+    A.svg = document.getElementById("annotationLayer");
+    if(!A.svg) return;
+    A.svg.setAttribute("width","100%");
+    A.svg.setAttribute("height","100%");
+    A.svg.style.position="absolute";
+    A.svg.style.inset="0";
+    A.svg.style.width="100%";
+    A.svg.style.height="100%";
+    A.svg.style.pointerEvents="none";
+    A.svg.style.zIndex="4";
+    A.svg.innerHTML="";
+    A.layer=document.createElementNS("http://www.w3.org/2000/svg","g");
+    A.layer.setAttribute("class","annotation-layer");
+    A.svg.appendChild(A.layer);
+  }
+
+  function graphToScreen(p){
+    const r=cy.renderedPosition({x:p.x,y:p.y});
+    return {x:r.x,y:r.y};
+  }
+  function screenToGraph(x,y){
+    const p=cy.pan(), z=cy.zoom();
+    return {x:(x-p.x)/z, y:(y-p.y)/z};
+  }
+  function pointsStr(points){ return points.map(p=>{let q=graphToScreen(p);return q.x+","+q.y}).join(" "); }
+
+  function selected(){ return A.items.find(x=>x.id===A.selected); }
+
+  function draw(){
+    if(!A.layer || !cy) return;
+    A.layer.innerHTML="";
+    A.items.forEach(item=>{
+      const g=document.createElementNS("http://www.w3.org/2000/svg","g");
+      g.dataset.id=item.id;
+
+      const poly=document.createElementNS("http://www.w3.org/2000/svg","polygon");
+      poly.setAttribute("points",pointsStr(item.points));
+      poly.setAttribute("fill",item.color);
+      poly.setAttribute("fill-opacity", item.id===A.selected ? ".20" : ".12");
+      poly.setAttribute("stroke",item.color);
+      poly.setAttribute("stroke-width",item.id===A.selected ? "3" : "2");
+      poly.setAttribute("stroke-dasharray", item.id===A.selected ? "7 5" : "5 5");
+      poly.style.pointerEvents="auto";
+      poly.style.cursor="move";
+      poly.addEventListener("pointerdown",e=>beginMove(e,item));
+      g.appendChild(poly);
+
+      if(item.showLabel !== false){
+        const cx=item.points.reduce((s,p)=>s+p.x,0)/item.points.length;
+        const cyy=item.points.reduce((s,p)=>s+p.y,0)/item.points.length;
+        const q=graphToScreen({x:cx,y:cyy});
+        const text=document.createElementNS("http://www.w3.org/2000/svg","text");
+        text.setAttribute("x",q.x); text.setAttribute("y",q.y);
+        text.setAttribute("text-anchor","middle");
+        text.setAttribute("dominant-baseline","middle");
+        text.setAttribute("font-size","14");
+        text.setAttribute("font-weight","700");
+        text.setAttribute("fill",item.color);
+        text.setAttribute("stroke","#fff");
+        text.setAttribute("stroke-width","4");
+        text.setAttribute("paint-order","stroke");
+        text.style.pointerEvents="none";
+        text.textContent=item.label;
+        g.appendChild(text);
+      }
+
+      if(item.id===A.selected){
+        item.points.forEach((p,i)=>{
+          const q=graphToScreen(p);
+          const h=document.createElementNS("http://www.w3.org/2000/svg","circle");
+          h.setAttribute("cx",q.x); h.setAttribute("cy",q.y); h.setAttribute("r","7");
+          h.setAttribute("fill","#fff"); h.setAttribute("stroke",item.color); h.setAttribute("stroke-width","3");
+          h.style.pointerEvents="auto"; h.style.cursor="grab";
+          h.addEventListener("pointerdown",e=>beginVertex(e,item,i));
+          g.appendChild(h);
+        });
+      }
+      A.layer.appendChild(g);
+    });
+    renderList();
+  }
+
+  function beginMove(e,item){
+    if(e.button!==0) return;
+    A.selected=item.id;
+    const q=screenToGraph(e.clientX-A.svg.getBoundingClientRect().left,e.clientY-A.svg.getBoundingClientRect().top);
+    A.drag={type:"move",item,start:q,original:item.points.map(p=>({...p}))};
+    e.preventDefault(); e.stopPropagation(); draw();
+  }
+  function beginVertex(e,item,i){
+    if(e.button!==0) return;
+    A.selected=item.id;
+    A.drag={type:"vertex",item,index:i};
+    e.preventDefault(); e.stopPropagation(); draw();
+  }
+  function pointerMove(e){
+    if(!A.drag) return;
+    const rect=A.svg.getBoundingClientRect();
+    const q=screenToGraph(e.clientX-rect.left,e.clientY-rect.top);
+    if(A.drag.type==="vertex"){
+      A.drag.item.points[A.drag.index]={x:q.x,y:q.y};
+    } else {
+      const dx=q.x-A.drag.start.x, dy=q.y-A.drag.start.y;
+      A.drag.item.points=A.drag.original.map(p=>({x:p.x+dx,y:p.y+dy}));
+    }
+    draw();
+  }
+  function pointerUp(){
+    if(A.drag){ A.drag=null; save(); renderList(); }
+  }
+
+  function add(){
+    const center=cy.renderedPosition(cy.nodes().length ? cy.nodes()[Math.floor(Math.random()*cy.nodes().length)].position() : {x:0,y:0});
+    const q=screenToGraph(center.x,center.y);
+    const s=80/cy.zoom();
+    const item={id:"a"+Date.now().toString(36),label:"Topic area",color:"#f59e0b",showLabel:true,
+      points:[{x:q.x-s,y:q.y-s*.65},{x:q.x+s,y:q.y-s*.65},{x:q.x+s*1.05,y:q.y+s*.55},{x:q.x-s*.85,y:q.y+s*.75}]};
+    A.items.push(item); A.selected=item.id; save(); draw();
+  }
+
+  function removeVertex(){
+    const item=selected();
+    if(item && item.points.length>3){ item.points.pop(); save(); draw(); }
+  }
+  function addVertex(){
+    const item=selected(); if(!item) return;
+    let best=0, bestLen=-1;
+    for(let i=0;i<item.points.length;i++){
+      const a=item.points[i],b=item.points[(i+1)%item.points.length];
+      const len=(a.x-b.x)**2+(a.y-b.y)**2;
+      if(len>bestLen){bestLen=len;best=i;}
+    }
+    const a=item.points[best],b=item.points[(best+1)%item.points.length];
+    item.points.splice(best+1,0,{x:(a.x+b.x)/2,y:(a.y+b.y)/2});
+    save(); draw();
+  }
+  function clear(){ A.items=[]; A.selected=null; save(); draw(); }
+
+  function renderList(){
+    const box=document.getElementById("areaList"); if(!box)return;
+    box.innerHTML=A.items.map(item=>`<div class="area-item ${item.id===A.selected?"selected":""}" data-id="${esc(item.id)}">
+      <input class="area-label" value="${esc(item.label)}" title="Label">
+      <input class="area-color" type="color" value="${esc(item.color)}" title="Colour">
+      <button class="area-select">Select</button>
+      <button class="area-add">＋ corner</button>
+      <button class="area-remove">− corner</button>
+      <button class="area-delete">Delete</button>
+      <label class="area-show"><input type="checkbox" ${item.showLabel!==false?"checked":""}> label</label>
+      <span class="area-count">${item.points.length} corners</span>
+    </div>`).join("");
+    box.querySelectorAll(".area-item").forEach(row=>{
+      const item=A.items.find(x=>x.id===row.dataset.id);
+      row.querySelector(".area-select").onclick=()=>{A.selected=item.id;draw();};
+      row.querySelector(".area-add").onclick=()=>{A.selected=item.id;addVertex();};
+      row.querySelector(".area-remove").onclick=()=>{A.selected=item.id;removeVertex();};
+      row.querySelector(".area-delete").onclick=()=>{A.items=A.items.filter(x=>x.id!==item.id);if(A.selected===item.id)A.selected=null;save();draw();};
+      row.querySelector(".area-label").oninput=e=>{item.label=e.target.value;save();draw();};
+      row.querySelector(".area-color").oninput=e=>{item.color=e.target.value;save();draw();};
+      row.querySelector(".area-show input").onchange=e=>{item.showLabel=e.target.checked;save();draw();};
+    });
+  }
+
+  function bind(){
+    ensureSvg(); load(); draw();
+    document.getElementById("addArea")?.addEventListener("click",add);
+    document.getElementById("clearAreas")?.addEventListener("click",clear);
+    document.addEventListener("pointermove",pointerMove);
+    document.addEventListener("pointerup",pointerUp);
+    cy.on("pan zoom resize",()=>draw());
+    const originalFit=cy.fit.bind(cy);
+    // redraw after common camera changes; explicit event handler above handles most cases.
+    renderList();
+  }
+
+  // Wait until the existing app has initialized Cytoscape.
+  const wait=setInterval(()=>{
+    if(window.cy && window.cy.container && document.getElementById("annotationLayer")){
+      clearInterval(wait); bind();
+    }
+  },100);
+
+  window.semanticAnnotationsV7={add,clear,draw};
+})();

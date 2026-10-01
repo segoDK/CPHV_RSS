@@ -1,8 +1,10 @@
-# Semantic Network Explorer v5
+# Semantic Network Explorer V7
+
+# Semantic Network Explorer v7
 
 Interactive semantic-network explorer using the corrected GraphML.
 
-## v5 features
+## v6 features
 - Original GraphML x/y layout is the default.
 - Hover to inspect without recentering; click to inspect and centre.
 - Strong selected-node highlighting.
@@ -35,3 +37,20 @@ Then commit the regenerated `data/network.json` and the site files.
 
 ## GitHub Pages
 Put `index.html`, `app.js`, `style.css`, `data/`, and `scripts/` at the repository root and publish the root of the main branch.
+
+
+## v6 annotation fix
+- Topic areas are rendered in a dedicated SVG overlay with explicit pointer-event handling so the Add topic area control reliably produces a visible polygon.
+
+
+## V7 polygon annotations
+
+Topic areas are free-form polygons anchored to the network coordinate system.
+
+- Drag the polygon interior to move the whole area.
+- Drag individual corner handles to reshape it.
+- Add or remove corners from the annotation controls.
+- Change colour and label.
+- Toggle labels.
+- Multiple areas are supported independently.
+- Annotation geometry is stored in the browser's local storage and follows the network when it is panned or zoomed.
