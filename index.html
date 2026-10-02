@@ -24,10 +24,11 @@
 <p class="hint">Cumulative mode reveals the network as the survey waves accumulate. Exact mode isolates one survey wave at a time.</p>
 </section>
 <section><h2>Annotations</h2>
-<p class="hint">Add movable topic areas and labels to mark regions of the map.</p>
-<button id="addArea">＋ Add topic area</button>
-<button id="clearAreas">Clear topic areas</button>
+<p class="hint" id="annHint"></p>
+<button id="addArea">＋ Draw new area</button>
 <div id="areaList"></div>
+<div class="io-row"><button id="exportAreas">Export</button><button id="importAreas">Import</button><button id="clearAreas">Clear all</button></div>
+<input type="file" id="importFile" accept="application/json,.json" hidden>
 </section>
 <section><h2>Actions</h2><button id="fit">Fit network</button><button id="resetStyle">Reset appearance</button><button id="downloadPng">Export PNG</button></section>
 <section><h2>Legend</h2><div id="legend"></div></section>

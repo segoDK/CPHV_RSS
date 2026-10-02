@@ -1,6 +1,6 @@
-# Semantic Network Explorer V8
+# Semantic Network Explorer V9
 
-# Semantic Network Explorer V8
+# Semantic Network Explorer V9
 
 Interactive semantic-network explorer using the corrected GraphML.
 
@@ -17,12 +17,11 @@ Interactive semantic-network explorer using the corrected GraphML.
   - **Show up to selected date** progressively reveals the network.
   - **Show only selected date** isolates one survey wave.
   - **Play timeline** automatically advances through the waves.
-- Free-form polygon topic areas with 3+ corners.
-  - Add or remove corners.
-  - Drag individual corners to shape the area.
-  - Drag the polygon itself to move the whole area.
-  - Optional labels and independent colours.
-  - Annotations are saved in the browser.
+- Polygon annotations (V9 rewrite), fixed to map coordinates so they follow pan and zoom.
+  - **Draw new area**: click corners on the map; finish with double-click, Enter, or by clicking the first corner. Esc cancels.
+  - **Edit**: select an area, then drag corners, drag a "+" on an edge to add a corner, double-click or right-click a corner to remove it, drag the outline or label to move the whole area.
+  - Per-area label, colour picker, fill strength, show/hide label, Zoom to, Delete.
+  - Saved in the browser. **Export/Import** JSON. To give every visitor the same annotations, commit the exported file as `data/annotations.json` (loaded on first visit when the visitor has none saved).
 - Connected nodes use short ID + answer preview.
 - Edge opacity can be set to 0%.
 
@@ -56,7 +55,7 @@ Topic areas are free-form polygons anchored to the network coordinate system.
 - Annotation geometry is stored in the browser's local storage and follows the network when it is panned or zoomed.
 
 
-## V8 annotation system
+## V9 annotation system
 
 The annotation feature uses one integrated SVG polygon layer tied directly to the Cytoscape graph coordinate system.
 
@@ -70,3 +69,11 @@ The annotation feature uses one integrated SVG polygon layer tied directly to th
 - Delete individual areas or clear all areas.
 - Areas remain attached to the network while panning and zooming.
 - Annotation data is stored locally in the browser.
+
+
+## V9 interaction fix
+
+The annotation layer no longer calls `cy.renderedPosition()`. Annotation coordinates
+are transformed using the Cytoscape core's pan and zoom values, while ordinary
+Cytoscape rendering is left untouched. The annotation SVG only accepts pointer
+events on actual polygon and corner shapes.
