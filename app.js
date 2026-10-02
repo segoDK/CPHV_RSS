@@ -1,7 +1,7 @@
 let network,cy,selectedNode=null,playing=false,timer=null;
 const palette=["#386cb0","#fdb462","#7fc97f","#ef3b2c","#beaed4","#fdc086","#ffff99","#666666","#1b9e77","#d95f02","#7570b3","#e7298a","#66a61e","#e6ab02","#a6761d","#1f78b4"];
 const months={Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12};
-let dates=[],colorAttribute="Modularity Class",sizeAttribute="degree",areas=[],selectedAreaId=null,timelineMode="cumulative";
+let dates=[],colorAttribute="Modularity Class",sizeAttribute="degree",timelineMode="cumulative";
 const $=id=>document.getElementById(id);
 const annotationLayer=()=>$("annotationLayer");
 const pretty=v=>({"Modularity Class":"Modularity class","weighted_degree":"Weighted degree","Betweenness Centrality":"Betweenness centrality","Closeness Centrality":"Closeness centrality","Harmonic Closeness Centrality":"Harmonic closeness","Eccentricity":"Eccentricity","Question":"Question"}[v]||v);
@@ -25,7 +25,6 @@ async function init(){
  $("colorBy").onchange=e=>{colorAttribute=e.target.value;updateStyle()};$("sizeBy").onchange=e=>{sizeAttribute=e.target.value;updateStyle()};
  $("sizeScale").oninput=updateStyle;$("edgeOpacity").oninput=updateStyle;
  $("fit").onclick=()=>cy.fit(cy.nodes(":visible"),40);$("resetStyle").onclick=resetStyle;$("downloadPng").onclick=exportPNG;
- $("addArea").onclick=addArea;$("clearAreas").onclick=clearAreas;
  const elements=[...network.nodes.map(n=>({data:n,position:{x:Number(n.x)||0,y:Number(n.y)||0}})),...network.edges.map(e=>({data:e}))];
  cy=cytoscape({container:$("cy"),elements,pixelRatio:1,wheelSensitivity:.2,boxSelectionEnabled:true,
   style:[
@@ -38,15 +37,13 @@ async function init(){
   ],
   layout:{name:"preset",fit:true,padding:50}
  });
- cy.on("pan zoom resize", renderAnnotations);
- cy.on("render", renderAnnotations);
  cy.on("mouseover","node",e=>{if(e.target.hasClass("area"))return;inspectNode(e.target,false);e.target.addClass("hovered")});
  cy.on("mouseout","node",e=>{e.target.removeClass("hovered")});
  cy.on("tap","node",e=>{if(e.target.hasClass("area"))return;inspectNode(e.target,true)});
  cy.on("tap",e=>{if(e.target===cy)clearInspector()});
  // Make initial network visible, with a random node as the initial inspected node but do not recenter.
  const visible=cy.nodes().filter(n=>!n.hasClass("area")); if(visible.length) inspectNode(visible[Math.floor(Math.random()*visible.length)],false);
- $("loading").style.display="none";updateTimeline();updateStyle();renderLegend();loadAreas();
+ $("loading").style.display="none";updateTimeline();updateStyle();renderLegend();initializeAnnotations();
 }
 function fill(s,vals){vals.forEach(v=>{let o=document.createElement("option");o.value=v;o.textContent=pretty(v);s.appendChild(o)})}
 function formatDate(k){let y=Math.floor(k/100),m=k%100;let name=Object.keys(months).find(x=>months[x]===m)||"";return `${name} ${y}`}
@@ -90,86 +87,6 @@ function clearInspector(){cy.elements().removeClass("faded highlighted");$("insp
 function togglePlay(){playing=!playing;$("play").textContent=playing?"❚❚ Pause timeline":"▶ Play timeline";if(!playing){clearInterval(timer);return} if(Number($("timeline").value)>=dates.length-1)$("timeline").value=0;timer=setInterval(()=>{let i=Number($("timeline").value);if(i>=dates.length-1){playing=false;clearInterval(timer);$("play").textContent="▶ Play timeline";return}$("timeline").value=i+1;updateTimeline();applyFilters()},900)}
 function resetStyle(){$("colorBy").value="Modularity Class";$("sizeBy").value="degree";$("sizeScale").value=1;$("edgeOpacity").value=.35;colorAttribute="Modularity Class";sizeAttribute="degree";updateStyle()}
 function exportPNG(){let png=cy.png({full:true,scale:2,bg:"#fbfcfe"}),a=document.createElement("a");a.href=png;a.download="semantic-network.png";a.click()}
-function defaultAreaPoints(){
- const w=cy.width(),h=cy.height(),z=cy.zoom(),pan=cy.pan();
- const sx=(w*.5-180), sy=(h*.5-110), ex=(w*.5+180), ey=(h*.5+110);
- return [[sx,sy],[ex,sy],[ex,ey],[sx,ey]].map(([x,y])=>({x:(x-pan.x)/z,y:(y-pan.y)/z}));
-}
-function modelToScreen(pt){const z=cy.zoom(),pan=cy.pan();return {x:pt.x*z+pan.x,y:pt.y*z+pan.y}}
-function screenToModel(x,y){const z=cy.zoom(),pan=cy.pan();return {x:(x-pan.x)/z,y:(y-pan.y)/z}}
-function areaCentroid(a){let sx=0,sy=0;a.points.forEach(p=>{sx+=p.x;sy+=p.y});return {x:sx/a.points.length,y:sy/a.points.length}}
-function addArea(){
- if(!cy)return;
- const id="area_"+Date.now();
- const a={id,label:"Topic area",color:palette[areas.length%palette.length],showLabel:true,points:defaultAreaPoints()};
- areas.push(a);selectedAreaId=id;saveAreas();renderAreaList();requestAnimationFrame(()=>renderAnnotations());
-}
-function renderAreaList(){
- const el=$("areaList"); el.innerHTML="";
- if(!areas.length){el.innerHTML='<div class="hint">No topic areas yet.</div>';return}
- areas.forEach(a=>{
-  const row=document.createElement("div");row.className="area-row"+(a.id===selectedAreaId?" selected":"");
-  row.innerHTML=`<button class="area-select" title="Select area">▱</button><input class="area-color" type="color" value="${a.color}"><input class="area-label" value="${escapeHtml(a.label)}" title="Topic label"><button class="delete-area">×</button>`;
-  row.querySelector('.area-select').onclick=()=>{selectedAreaId=a.id;renderAreaList();renderAnnotations()};
-  row.querySelector('.area-color').onchange=e=>{a.color=e.target.value;saveAreas();renderAnnotations()};
-  row.querySelector('.area-label').oninput=e=>{a.label=e.target.value;saveAreas();renderAnnotations()};
-  row.querySelector('.delete-area').onclick=()=>{areas=areas.filter(x=>x.id!==a.id);if(selectedAreaId===a.id)selectedAreaId=areas[0]?.id||null;saveAreas();renderAreaList();renderAnnotations()};
-  el.appendChild(row);
-  const tools=document.createElement('div');tools.className='area-tools';
-  tools.innerHTML=`<button class="add-corner">＋ Add corner</button><button class="remove-corner" ${a.points.length<=3?'disabled':''}>− Remove corner</button><label class="label-toggle"><input type="checkbox" ${a.showLabel?'checked':''}> Show label</label><span class="corner-count">${a.points.length} corners</span>`;
-  tools.querySelector('.add-corner').onclick=()=>addCorner(a.id);
-  tools.querySelector('.remove-corner').onclick=()=>removeCorner(a.id);
-  tools.querySelector('input').onchange=e=>{a.showLabel=e.target.checked;saveAreas();renderAnnotations()};
-  row.after(tools);
- });
-}
-function addCorner(id){
- const a=areas.find(x=>x.id===id);if(!a)return;
- let best=0,bestLen=-1;
- for(let i=0;i<a.points.length;i++){const p=a.points[i],q=a.points[(i+1)%a.points.length];const dx=q.x-p.x,dy=q.y-p.y,len=dx*dx+dy*dy;if(len>bestLen){bestLen=len;best=i}}
- const p=a.points[best],q=a.points[(best+1)%a.points.length];
- a.points.splice(best+1,0,{x:(p.x+q.x)/2,y:(p.y+q.y)/2});selectedAreaId=id;saveAreas();renderAreaList();renderAnnotations();
-}
-function removeCorner(id){
- const a=areas.find(x=>x.id===id);if(!a||a.points.length<=3)return;
- // Remove the vertex nearest the centroid, preserving at least a triangle.
- const c=areaCentroid(a);let idx=0,best=Infinity;a.points.forEach((p,i)=>{const d=(p.x-c.x)**2+(p.y-c.y)**2;if(d<best){best=d;idx=i}});a.points.splice(idx,1);saveAreas();renderAreaList();renderAnnotations();
-}
-function svgEl(tag,attrs={}){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v] of Object.entries(attrs))e.setAttribute(k,v);return e}
-function renderAnnotations(){
- const svg=annotationLayer();if(!svg||!cy)return;while(svg.firstChild)svg.removeChild(svg.firstChild);
- const w=Math.max(1,cy.width()),h=Math.max(1,cy.height());svg.setAttribute('width',w);svg.setAttribute('height',h);svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
- areas.forEach(a=>{
-  const g=svgEl('g',{class:'annotation-group'+(a.id===selectedAreaId?' selected':'')});g.style.pointerEvents='auto';
-  const pts=a.points.map(modelToScreen);const poly=svgEl('polygon',{class:'annotation-polygon',points:pts.map(p=>`${p.x},${p.y}`).join(' '),fill:a.color,'fill-opacity':'0.16',stroke:a.color});
-  poly.style.pointerEvents='all';poly.addEventListener('pointerdown',e=>startAreaDrag(e,a.id));
-  poly.addEventListener('click',e=>{e.stopPropagation();selectedAreaId=a.id;renderAreaList();renderAnnotations()});
-  g.appendChild(poly);
-  if(a.showLabel){const c=modelToScreen(areaCentroid(a));const t=svgEl('text',{class:'annotation-label',x:c.x,y:c.y,'text-anchor':'middle','dominant-baseline':'middle'});t.textContent=a.label||'';g.appendChild(t)}
-  pts.forEach((p,i)=>{
-   const h=svgEl('circle',{class:'annotation-handle',cx:p.x,cy:p.y,r:8});h.style.pointerEvents='all';
-   h.addEventListener('pointerdown',e=>startHandleDrag(e,a.id,i));
-   g.appendChild(h);
-  });
-  svg.appendChild(g);
- });
-}
-function startHandleDrag(e,id,index){
- e.preventDefault();e.stopPropagation();const a=areas.find(x=>x.id===id);if(!a)return;selectedAreaId=id;renderAreaList();
- const move=ev=>{const r=annotationLayer().getBoundingClientRect();const p=screenToModel(ev.clientX-r.left,ev.clientY-r.top);a.points[index]=p;renderAnnotations()};
- const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);saveAreas()};
- window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
-}
-function startAreaDrag(e,id){
- e.preventDefault();e.stopPropagation();const a=areas.find(x=>x.id===id);if(!a)return;selectedAreaId=id;renderAreaList();
- const r=annotationLayer().getBoundingClientRect(),start=screenToModel(e.clientX-r.left,e.clientY-r.top);const original=a.points.map(p=>({...p}));
- const move=ev=>{const rr=annotationLayer().getBoundingClientRect(),now=screenToModel(ev.clientX-rr.left,ev.clientY-rr.top),dx=now.x-start.x,dy=now.y-start.y;a.points=a.points.map((p,i)=>({x:original[i].x+dx,y:original[i].y+dy}));renderAnnotations()};
- const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);saveAreas()};
- window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);
-}
-function saveAreas(){localStorage.setItem('semanticAreas',JSON.stringify(areas))}
-function loadAreas(){try{areas=JSON.parse(localStorage.getItem('semanticAreas')||'[]')}catch{areas=[]}areas=areas.filter(a=>Array.isArray(a.points)&&a.points.length>=3);selectedAreaId=areas[0]?.id||null;renderAreaList();renderAnnotations()}
-function clearAreas(){areas=[];selectedAreaId=null;localStorage.removeItem('semanticAreas');renderAreaList();renderAnnotations()}
 function renderLegend(){let e=$("legend");if(colorAttribute==="Village"){let vals=[...new Set(network.nodes.map(n=>n.Village))].sort();e.innerHTML=vals.map((v,i)=>`<div class="legend-item"><span class="swatch" style="background:${palette[i%palette.length]}"></span>${escapeHtml(v)}</div>`).join("")}else if(colorAttribute==="Question"){let vals=[...new Set(network.nodes.map(n=>n.Question))];e.innerHTML=vals.map((v,i)=>`<div class="legend-item"><span class="swatch" style="background:${palette[i%palette.length]}"></span>${escapeHtml(truncate(v,38))}</div>`).join("")}else if(colorAttribute==="Modularity Class"){e.innerHTML=palette.slice(0,8).map((c,i)=>`<div class="legend-item"><span class="swatch" style="background:${c}"></span>Community ${i}</div>`).join("")}else e.innerHTML="<div class='legend-item'>Colour scale / categorical colours shown on nodes.</div>"}
 function truncate(s,n){s=String(s);return s.length>n?s.slice(0,n-1)+"…":s}
 function escapeHtml(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
@@ -193,8 +110,22 @@ function annotationStorageKey() {
 
 function loadAnnotations() {
   try {
-    const saved = JSON.parse(localStorage.getItem(annotationStorageKey()) || "[]");
-    annotationState.items = Array.isArray(saved) ? saved : [];
+    const current = JSON.parse(localStorage.getItem(annotationStorageKey()) || "null");
+    if (Array.isArray(current)) {
+      annotationState.items = current.filter(item => Array.isArray(item.points) && item.points.length >= 3);
+      return;
+    }
+
+    // One-time migration from the pre-V8 storage format.
+    const legacy = JSON.parse(localStorage.getItem("semanticAreas") || "[]");
+    annotationState.items = Array.isArray(legacy)
+      ? legacy.filter(item => Array.isArray(item.points) && item.points.length >= 3)
+      : [];
+
+    if (annotationState.items.length) {
+      saveAnnotations();
+      localStorage.removeItem("semanticAreas");
+    }
   } catch (e) {
     annotationState.items = [];
   }
@@ -597,9 +528,12 @@ document.addEventListener("pointerup", () => {
   renderAnnotationControls();
 });
 
+let annotationsInitialized = false;
+
 function initializeAnnotations() {
   const svg = document.getElementById("annotationLayer");
-  if (!svg || !cy) return;
+  if (!svg || !cy || annotationsInitialized) return;
+  annotationsInitialized = true;
 
   svg.style.pointerEvents = "none";
   svg.style.position = "absolute";
@@ -622,25 +556,6 @@ function initializeAnnotations() {
     clearTopicAreas
   );
 
-  cy.on("pan zoom resize", renderAnnotations);
+  cy.on("pan zoom resize render", renderAnnotations);
 }
 
-/* Call this once, after Cytoscape has been constructed. */
-
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, ch => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#039;"
-  }[ch]));
-}
-
-(function waitForGraphForAnnotations() {
-  if (typeof cy !== "undefined" && cy && document.getElementById("annotationLayer")) {
-    initializeAnnotations();
-  } else {
-    requestAnimationFrame(waitForGraphForAnnotations);
-  }
-})();
