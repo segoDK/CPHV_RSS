@@ -93,542 +93,255 @@ function escapeHtml(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;",
 init().catch(e=>{console.error(e);$("loading").textContent="Could not load the network. See the browser console."});
 
 
+
 /* ============================================================
-   V8 ANNOTATION SYSTEM
-   Single authoritative SVG annotation layer.
-   - Cytoscape owns the map and its pointer interaction.
-   - SVG is a visual overlay and only selected annotation controls
-     receive pointer events.
-   - No render-event feedback loop and no full SVG rebuild during drag.
+   V9 ANNOTATION SYSTEM
+   - Polygons are stored in MAP coordinates, so they stick to the
+     network when you pan or zoom (one transform on one <g>).
+   - The SVG never intercepts the map: only outlines, corner
+     handles and the label of the SELECTED area take the pointer.
+   - Draw: click corners, finish with double-click / click first
+     corner / Enter. Esc cancels.
+   - Edit (select an area): drag corners, drag "+" edge handles
+     to add corners, double-click or right-click a corner to
+     remove it, drag the outline or label to move the whole area.
+   - Saved in the browser; Export/Import JSON; optional shared
+     defaults from data/annotations.json.
    ============================================================ */
-const annotationState = {
-  items: [],
-  selectedId: null,
-  drag: null,
-  raf: 0
-};
+const SVGNS="http://www.w3.org/2000/svg", ANN_KEY="semantic-network-explorer-annotations-v9";
+const ANN_COLORS=["#e6194b","#3cb44b","#4363d8","#f58231","#911eb4","#008080","#f032e6","#9a6324","#808000","#000075"];
+const ann={items:[],sel:null,selVertex:null,drag:null,draw:null,svg:null,root:null,ready:false};
 
-const ANNOTATION_STORAGE_KEY = "semantic-network-explorer-annotations-v8";
-const SVG_NS = "http://www.w3.org/2000/svg";
+const mk=(tag,attrs={},parent)=>{const e=document.createElementNS(SVGNS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);if(parent)parent.appendChild(e);return e};
+const annZoom=()=>cy?cy.zoom():1;
+const annById=id=>ann.items.find(a=>a.id===id)||null;
+const annSel=()=>annById(ann.sel);
 
-function annotationSvg() {
-  return document.getElementById("annotationLayer");
+function annClean(a,i){
+ if(!a||!Array.isArray(a.points)||a.points.length<3)return null;
+ const pts=a.points.map(p=>({x:Number(p&&p.x),y:Number(p&&p.y)}));
+ if(!pts.every(p=>isFinite(p.x)&&isFinite(p.y)))return null;
+ return {id:String(a.id||"a"+Date.now()+"-"+i),label:String(a.label??"Topic area"),
+  color:/^#[0-9a-f]{6}$/i.test(a.color||"")?a.color:ANN_COLORS[i%ANN_COLORS.length],
+  opacity:isFinite(+a.opacity)?Math.min(.6,Math.max(.03,+a.opacity)):.12,showLabel:a.showLabel!==false,points:pts};
+}
+const annSave=()=>{try{localStorage.setItem(ANN_KEY,JSON.stringify(ann.items))}catch(e){console.warn("Could not save annotations",e)}};
+async function annLoad(){
+ let raw=null;
+ try{raw=localStorage.getItem(ANN_KEY)||localStorage.getItem("semantic-network-explorer-annotations-v8")}catch(e){}
+ let list=null;
+ try{if(raw)list=JSON.parse(raw)}catch(e){}
+ if(!Array.isArray(list)){ // first visit: try shared defaults committed to the repo
+  try{const r=await fetch("data/annotations.json",{cache:"no-store"});if(r.ok){const j=await r.json();list=Array.isArray(j)?j:j.annotations}}catch(e){}
+ }
+ ann.items=(Array.isArray(list)?list:[]).map(annClean).filter(Boolean);
 }
 
-function annotationStorageKey() {
-  return ANNOTATION_STORAGE_KEY;
+function annCentroid(a){
+ let A=0,cx=0,cy_=0;const p=a.points;
+ for(let i=0;i<p.length;i++){const q=p[(i+1)%p.length],c=p[i].x*q.y-q.x*p[i].y;A+=c;cx+=(p[i].x+q.x)*c;cy_+=(p[i].y+q.y)*c}
+ if(Math.abs(A)<1e-9)return {x:p.reduce((s,q)=>s+q.x,0)/p.length,y:p.reduce((s,q)=>s+q.y,0)/p.length};
+ return {x:cx/(3*A),y:cy_/(3*A)};
 }
-
-function finiteNumber(v) {
-  return Number.isFinite(Number(v));
+function annToModel(ev){
+ const r=ann.svg.getBoundingClientRect(),pan=cy.pan(),z=cy.zoom();
+ return {x:(ev.clientX-r.left-pan.x)/z,y:(ev.clientY-r.top-pan.y)/z};
 }
+const annPts=pts=>pts.map(p=>p.x+","+p.y).join(" ");
 
-function normalizeAnnotation(item, index = 0) {
-  if (!item || !Array.isArray(item.points) || item.points.length < 3) return null;
-
-  const points = item.points.map(p => ({
-    x: Number(p?.x),
-    y: Number(p?.y)
-  }));
-
-  if (!points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y))) return null;
-
-  return {
-    id: String(item.id || `annotation-${Date.now()}-${index}`),
-    label: String(item.label ?? "Topic area"),
-    color: /^#[0-9a-f]{6}$/i.test(String(item.color || "")) ? String(item.color) : "#f59e0b",
-    showLabel: item.showLabel !== false,
-    points
-  };
+/* ---- drawing the SVG ---- */
+function annApplyView(){ // cheap: runs on every pan/zoom
+ if(!ann.root)return;
+ const pan=cy.pan(),z=cy.zoom(),inv=1/z;
+ ann.root.setAttribute("transform",`translate(${pan.x} ${pan.y}) scale(${z})`);
+ ann.root.querySelectorAll("[data-r]").forEach(e=>e.setAttribute("r",e.dataset.r*inv));
+ ann.root.querySelectorAll("[data-fs]").forEach(e=>{e.setAttribute("font-size",e.dataset.fs*inv);e.setAttribute("stroke-width",4*inv)});
+ ann.root.querySelectorAll("[data-sw]").forEach(e=>e.setAttribute("stroke-width",e.dataset.sw*inv));
+ ann.root.querySelectorAll("[data-dash]").forEach(e=>e.setAttribute("stroke-dasharray",`${8*inv} ${5*inv}`));
 }
-
-function loadAnnotations() {
-  annotationState.items = [];
-  annotationState.selectedId = null;
-
-  try {
-    let raw = localStorage.getItem(annotationStorageKey());
-    let sourceKey = annotationStorageKey();
-
-    if (!raw) {
-      raw = localStorage.getItem("semanticAreas");
-      sourceKey = "semanticAreas";
-    }
-
-    if (!raw) return;
-
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return;
-
-    annotationState.items = parsed
-      .map((item, index) => normalizeAnnotation(item, index))
-      .filter(Boolean);
-
-    // Persist the validated V8 representation and retire the legacy key.
-    saveAnnotations();
-    if (sourceKey === "semanticAreas") localStorage.removeItem("semanticAreas");
-  } catch (error) {
-    // A bad annotation must never prevent the network from loading.
-    annotationState.items = [];
-    annotationState.selectedId = null;
-    try {
-      localStorage.removeItem(annotationStorageKey());
-      localStorage.removeItem("semanticAreas");
-    } catch (_) {}
+function annRender(){
+ if(!ann.svg)return;
+ ann.root.replaceChildren();
+ ann.items.forEach(a=>{
+  const on=a.id===ann.sel,g=mk("g",{"data-id":a.id},ann.root);
+  mk("polygon",{class:"ann-fill",points:annPts(a.points),fill:a.color,"fill-opacity":a.opacity},g);
+  const edge=mk("polygon",{class:"ann-edge",points:annPts(a.points),fill:"none",stroke:a.color,"stroke-linejoin":"round","data-sw":on?3:2,"data-dash":1},g);
+  const hit=mk("polygon",{class:"ann-hit"+(on?" on":""),points:annPts(a.points),fill:"none",stroke:"transparent","data-sw":14},g);
+  hit.addEventListener("pointerdown",e=>annDown(e,a,{type:"move"}));
+  if(a.showLabel){
+   const c=annCentroid(a),t=mk("text",{class:"ann-label"+(on?" on":""),x:c.x,y:c.y,"text-anchor":"middle","dominant-baseline":"middle","data-fs":16,fill:a.color},g);
+   t.textContent=a.label||"Topic area";
+   t.addEventListener("pointerdown",e=>annDown(e,a,{type:"move"}));
   }
-}
-
-function saveAnnotations() {
-  try {
-    const safe = annotationState.items
-      .map((item, index) => normalizeAnnotation(item, index))
-      .filter(Boolean);
-    annotationState.items = safe;
-    localStorage.setItem(annotationStorageKey(), JSON.stringify(safe));
-  } catch (error) {
-    console.warn("Could not save annotations", error);
+  if(on){
+   a.points.forEach((p,i)=>{ // edge "+" handles
+    const q=a.points[(i+1)%a.points.length];
+    const m=mk("circle",{class:"ann-mid",cx:(p.x+q.x)/2,cy:(p.y+q.y)/2,"data-r":5,stroke:a.color,"data-sw":2},g);
+    m.addEventListener("pointerdown",e=>{const np={x:(p.x+q.x)/2,y:(p.y+q.y)/2};a.points.splice(i+1,0,np);ann.selVertex=i+1;annRender();annDown(e,a,{type:"vertex",index:i+1},true)});
+   });
+   a.points.forEach((p,i)=>{
+    const h=mk("circle",{class:"ann-handle"+(i===ann.selVertex?" sel":""),cx:p.x,cy:p.y,"data-r":7,stroke:a.color,"data-sw":3},g);
+    h.addEventListener("pointerdown",e=>{ann.selVertex=i;annDown(e,a,{type:"vertex",index:i})});
+    h.addEventListener("dblclick",e=>{e.preventDefault();annRemoveCorner(a,i)});
+    h.addEventListener("contextmenu",e=>{e.preventDefault();annRemoveCorner(a,i)});
+   });
   }
+ });
+ if(ann.draw)annRenderDraft();
+ annApplyView();
+}
+function annUpdateShape(a){ // used during drag: no rebuild
+ const g=ann.root.querySelector(`g[data-id="${a.id}"]`);if(!g)return;
+ const s=annPts(a.points);g.querySelectorAll("polygon").forEach(p=>p.setAttribute("points",s));
+ const c=annCentroid(a),t=g.querySelector("text");if(t){t.setAttribute("x",c.x);t.setAttribute("y",c.y)}
+ g.querySelectorAll(".ann-handle").forEach((h,i)=>{h.setAttribute("cx",a.points[i].x);h.setAttribute("cy",a.points[i].y)});
+ g.querySelectorAll(".ann-mid").forEach((m,i)=>{const p=a.points[i],q=a.points[(i+1)%a.points.length];m.setAttribute("cx",(p.x+q.x)/2);m.setAttribute("cy",(p.y+q.y)/2)});
+}
+function annStyleOnly(a){
+ const g=ann.root.querySelector(`g[data-id="${a.id}"]`);if(!g)return;
+ g.querySelector(".ann-fill").setAttribute("fill",a.color);g.querySelector(".ann-fill").setAttribute("fill-opacity",a.opacity);
+ g.querySelector(".ann-edge").setAttribute("stroke",a.color);
+ const t=g.querySelector("text");if(t){t.setAttribute("fill",a.color);t.textContent=a.label||"Topic area"}
+ g.querySelectorAll(".ann-handle,.ann-mid").forEach(h=>h.setAttribute("stroke",a.color));
 }
 
-function annotationCentre(item) {
-  let sx = 0;
-  let sy = 0;
-  item.points.forEach(p => {
-    sx += p.x;
-    sy += p.y;
-  });
-  return {
-    x: sx / item.points.length,
-    y: sy / item.points.length
-  };
+/* ---- interaction ---- */
+function annSelect(id){
+ ann.sel=id;ann.selVertex=null;annRender();annList();
+}
+function annDown(e,a,drag,keepSel){
+ if(e.button!==0||ann.draw)return;
+ e.preventDefault();e.stopPropagation();
+ if(ann.sel!==a.id&&!keepSel){annSelect(a.id);if(drag.type==="move"){/* first click only selects */return}}
+ ann.drag={...drag,a,start:annToModel(e),orig:a.points.map(p=>({...p})),moved:false};
+}
+function annMove(e){
+ const d=ann.drag;
+ if(d){
+  const p=annToModel(e);d.moved=true;
+  if(d.type==="vertex")d.a.points[d.index]=p;
+  else{const dx=p.x-d.start.x,dy=p.y-d.start.y;d.a.points=d.orig.map(o=>({x:o.x+dx,y:o.y+dy}))}
+  annUpdateShape(d.a);
+ }
+ if(ann.draw){ann.draw.cursor=annToModel(e);annRenderDraft()}
+}
+function annUp(){
+ const d=ann.drag;if(!d)return;
+ ann.drag=null;annSave();annList();
+ if(d.moved)annRender(); // a plain click keeps the DOM so double-click on a corner still works
+ else{const g=ann.root.querySelector(`g[data-id="${d.a.id}"]`);if(g)g.querySelectorAll(".ann-handle").forEach((h,i)=>h.classList.toggle("sel",i===ann.selVertex))}
+}
+function annRemoveCorner(a,i){
+ if(a.points.length<=3)return;
+ a.points.splice(i,1);ann.selVertex=null;annSave();annRender();annList();
+}
+function annAddCorner(a){ // sidebar button: split the longest edge
+ let best=0,bl=-1;
+ a.points.forEach((p,i)=>{const q=a.points[(i+1)%a.points.length],l=(p.x-q.x)**2+(p.y-q.y)**2;if(l>bl){bl=l;best=i}});
+ const p=a.points[best],q=a.points[(best+1)%a.points.length];
+ a.points.splice(best+1,0,{x:(p.x+q.x)/2,y:(p.y+q.y)/2});ann.selVertex=best+1;annSave();annRender();annList();
 }
 
-function graphToAnnotationScreen(point) {
-  if (!cy) return { x: 0, y: 0 };
-  const pan = cy.pan();
-  const zoom = cy.zoom();
-  return {
-    x: Number(point.x) * zoom + pan.x,
-    y: Number(point.y) * zoom + pan.y
-  };
+/* ---- drawing mode ---- */
+function annStartDraw(){
+ if(ann.draw)return annCancelDraw();
+ ann.sel=null;ann.draw={points:[],cursor:null};
+ ann.svg.classList.add("drawing");$("addArea").textContent="✕ Cancel drawing";
+ annRender();annList();annHint();
+}
+function annCancelDraw(){
+ ann.draw=null;ann.svg.classList.remove("drawing");$("addArea").textContent="＋ Draw new area";
+ annRender();annHint();
+}
+function annFinishDraw(){
+ const d=ann.draw;if(!d)return;
+ if(d.points.length<3){annCancelDraw();return}
+ const i=ann.items.length,a=annClean({id:"a"+Date.now()+"-"+Math.random().toString(36).slice(2,6),label:"Topic area "+(i+1),color:ANN_COLORS[i%ANN_COLORS.length],points:d.points},i);
+ ann.items.push(a);annCancelDraw();ann.sel=a.id;annSave();annRender();annList();
+}
+function annRenderDraft(){
+ ann.root.querySelectorAll(".ann-draft").forEach(e=>e.remove());
+ const d=ann.draw;if(!d)return;
+ const g=mk("g",{class:"ann-draft"},ann.root),pts=d.points.slice();
+ if(d.cursor)pts.push(d.cursor);
+ if(pts.length>1)mk("polyline",{points:annPts(pts),fill:"rgba(49,94,251,.12)",stroke:"#315efb","data-sw":2,"data-dash":1},g);
+ d.points.forEach((p,i)=>mk("circle",{cx:p.x,cy:p.y,"data-r":i===0?9:6,fill:i===0?"#315efb":"#fff",stroke:"#315efb","data-sw":2},g));
+ annApplyView();
+}
+function annHint(){
+ $("annHint").textContent=ann.draw
+  ?"Click on the map to place corners. Click the first (blue) corner, double-click or press Enter to finish. Esc cancels."
+  :"Draw areas to highlight regions. Select an area to drag its corners, drag a “+” on an edge to add a corner, double-click or right-click a corner to remove it. Areas stay fixed to the map when you pan or zoom.";
 }
 
-function annotationScreenToGraph(clientX, clientY) {
-  const svg = annotationSvg();
-  if (!svg || !cy) return { x: 0, y: 0 };
-
-  const rect = svg.getBoundingClientRect();
-  const renderedX = clientX - rect.left;
-  const renderedY = clientY - rect.top;
-  const pan = cy.pan();
-  const zoom = cy.zoom() || 1;
-
-  return {
-    x: (renderedX - pan.x) / zoom,
-    y: (renderedY - pan.y) / zoom
-  };
+/* ---- sidebar ---- */
+function annList(){
+ const list=$("areaList");list.innerHTML="";
+ ann.items.forEach(a=>{
+  const row=document.createElement("div");row.className="area-item"+(a.id===ann.sel?" selected":"");
+  row.innerHTML=`<div class="area-top"><input class="area-label" value="${escapeHtml(a.label)}" placeholder="Label"><input class="area-color" type="color" value="${a.color}" title="Colour"></div>
+  <label class="area-row">Fill <input class="area-op" type="range" min=".03" max=".6" step=".01" value="${a.opacity}"></label>
+  <label class="area-show"><input type="checkbox" ${a.showLabel?"checked":""}> Show label on map</label>
+  <div class="area-actions"><button class="a-sel">${a.id===ann.sel?"Deselect":"Edit"}</button><button class="a-zoom">Zoom to</button><button class="a-add">＋ Corner</button><button class="a-rem" ${a.points.length<=3?"disabled":""}>− Corner</button><button class="a-del">Delete</button></div>
+  <span class="area-count">${a.points.length} corners</span>`;
+  const q=s=>row.querySelector(s);
+  q(".a-sel").onclick=()=>annSelect(a.id===ann.sel?null:a.id);
+  q(".a-zoom").onclick=()=>{const xs=a.points.map(p=>p.x),ys=a.points.map(p=>p.y),pad=40,w=cy.width(),h=cy.height();
+   const z=Math.min((w-2*pad)/(Math.max(...xs)-Math.min(...xs)||1),(h-2*pad)/(Math.max(...ys)-Math.min(...ys)||1));
+   cy.animate({zoom:z,pan:{x:w/2-z*(Math.min(...xs)+Math.max(...xs))/2,y:h/2-z*(Math.min(...ys)+Math.max(...ys))/2},duration:300})};
+  q(".a-add").onclick=()=>{ann.sel=a.id;annAddCorner(a)};
+  q(".a-rem").onclick=()=>{ann.sel=a.id;annRemoveCorner(a,ann.selVertex!=null?ann.selVertex:a.points.length-1)};
+  q(".a-del").onclick=()=>{ann.items=ann.items.filter(x=>x!==a);if(ann.sel===a.id)ann.sel=null;annSave();annRender();annList()};
+  q(".area-label").oninput=e=>{a.label=e.target.value;annSave();annStyleOnly(a);if(!a.showLabel)return;annApplyView()};
+  q(".area-color").oninput=e=>{a.color=e.target.value;annSave();annStyleOnly(a)};
+  q(".area-op").oninput=e=>{a.opacity=+e.target.value;annSave();annStyleOnly(a)};
+  q(".area-show input").onchange=e=>{a.showLabel=e.target.checked;annSave();annRender()};
+  list.appendChild(row);
+ });
+}
+function annExport(){
+ const b=new Blob([JSON.stringify(ann.items,null,2)],{type:"application/json"}),u=URL.createObjectURL(b),l=document.createElement("a");
+ l.href=u;l.download="annotations.json";l.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
+}
+function annImport(file){
+ const r=new FileReader();
+ r.onload=()=>{try{const j=JSON.parse(r.result),list=(Array.isArray(j)?j:j.annotations).map(annClean).filter(Boolean);
+  if(!list.length)throw 0;ann.items=ann.items.concat(list.map(a=>({...a,id:a.id+"-"+Math.random().toString(36).slice(2,5)})));annSave();annRender();annList()}
+  catch(e){alert("That file doesn't contain valid annotations.")}};
+ r.readAsText(file);
 }
 
-function annotationPointString(points) {
-  return points.map(point => {
-    const p = graphToAnnotationScreen(point);
-    return `${p.x},${p.y}`;
-  }).join(" ");
-}
-
-function selectedAnnotation() {
-  return annotationState.items.find(
-    item => item.id === annotationState.selectedId
-  ) || null;
-}
-
-function ensureAnnotationLayer() {
-  const svg = annotationSvg();
-  if (!svg) return null;
-
-  let layer = svg.querySelector(".annotation-layer");
-  if (!layer) {
-    layer = document.createElementNS(SVG_NS, "g");
-    layer.setAttribute("class", "annotation-layer");
-    svg.appendChild(layer);
-  }
-  return layer;
-}
-
-function makeSvg(tag, attrs = {}) {
-  const el = document.createElementNS(SVG_NS, tag);
-  Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
-  return el;
-}
-
-function updateAnnotationVisual(item, group) {
-  const polygon = group.querySelector(".annotation-polygon");
-  if (polygon) {
-    polygon.setAttribute("points", annotationPointString(item.points));
-    polygon.setAttribute("fill", item.color);
-    polygon.setAttribute("stroke", item.color);
-    polygon.setAttribute(
-      "fill-opacity",
-      item.id === annotationState.selectedId ? "0.22" : "0.12"
-    );
-    polygon.setAttribute(
-      "stroke-width",
-      item.id === annotationState.selectedId ? "3" : "2"
-    );
-  }
-
-  const centre = graphToAnnotationScreen(annotationCentre(item));
-  const label = group.querySelector(".annotation-label");
-  if (label) {
-    label.setAttribute("x", centre.x);
-    label.setAttribute("y", centre.y);
-    label.setAttribute("fill", item.color);
-    label.textContent = item.label || "Topic area";
-  }
-
-  group.querySelectorAll(".annotation-handle").forEach((handle, index) => {
-    const point = item.points[index];
-    if (!point) return;
-    const screen = graphToAnnotationScreen(point);
-    handle.setAttribute("cx", screen.x);
-    handle.setAttribute("cy", screen.y);
-    handle.setAttribute("stroke", item.color);
-  });
-}
-
-function scheduleAnnotationVisualUpdate() {
-  if (annotationState.raf) return;
-  annotationState.raf = requestAnimationFrame(() => {
-    annotationState.raf = 0;
-    updateAnnotationVisuals();
-  });
-}
-
-function updateAnnotationVisuals() {
-  const layer = ensureAnnotationLayer();
-  if (!layer || !cy) return;
-
-  const groups = layer.querySelectorAll(".annotation-group");
-  groups.forEach(group => {
-    const item = annotationState.items.find(
-      candidate => candidate.id === group.dataset.annotationId
-    );
-    if (item) updateAnnotationVisual(item, group);
-  });
-}
-
-function beginPolygonDrag(event, item, polygon) {
-  if (event.button !== 0) return;
-
-  annotationState.selectedId = item.id;
-  annotationState.drag = {
-    type: "polygon",
-    item,
-    start: annotationScreenToGraph(event.clientX, event.clientY),
-    original: item.points.map(p => ({ ...p }))
-  };
-
-  try { polygon.setPointerCapture(event.pointerId); } catch (_) {}
-  event.preventDefault();
-  event.stopPropagation();
-  renderAnnotationControls();
-  updateAnnotationVisuals();
-}
-
-function beginVertexDrag(event, item, index, handle) {
-  if (event.button !== 0) return;
-
-  annotationState.selectedId = item.id;
-  annotationState.drag = {
-    type: "vertex",
-    item,
-    index
-  };
-
-  try { handle.setPointerCapture(event.pointerId); } catch (_) {}
-  event.preventDefault();
-  event.stopPropagation();
-  renderAnnotationControls();
-}
-
-function buildAnnotationGroup(item) {
-  const group = makeSvg("g", {
-    class: "annotation-group",
-    "data-annotation-id": item.id
-  });
-
-  const polygon = makeSvg("polygon", {
-    class: "annotation-polygon",
-    points: annotationPointString(item.points),
-    fill: item.color,
-    "fill-opacity": item.id === annotationState.selectedId ? "0.22" : "0.12",
-    stroke: item.color,
-    "stroke-width": item.id === annotationState.selectedId ? "3" : "2",
-    "stroke-dasharray": "7 5"
-  });
-
-  // Keep polygon interaction deliberately narrow. The map remains usable
-  // everywhere outside an actively selected annotation.
-  polygon.style.pointerEvents = item.id === annotationState.selectedId ? "auto" : "none";
-  polygon.style.cursor = "move";
-  polygon.addEventListener("pointerdown", event => beginPolygonDrag(event, item, polygon));
-  group.appendChild(polygon);
-
-  if (item.showLabel !== false) {
-    const centre = graphToAnnotationScreen(annotationCentre(item));
-    const text = makeSvg("text", {
-      class: "annotation-label",
-      x: centre.x,
-      y: centre.y,
-      "text-anchor": "middle",
-      "dominant-baseline": "middle"
-    });
-    text.textContent = item.label || "Topic area";
-    group.appendChild(text);
-  }
-
-  if (item.id === annotationState.selectedId) {
-    item.points.forEach((point, index) => {
-      const screen = graphToAnnotationScreen(point);
-      const handle = makeSvg("circle", {
-        class: "annotation-handle",
-        cx: screen.x,
-        cy: screen.y,
-        r: "7",
-        fill: "#ffffff",
-        stroke: item.color,
-        "stroke-width": "3"
-      });
-      handle.style.pointerEvents = "auto";
-      handle.addEventListener("pointerdown", event => beginVertexDrag(event, item, index, handle));
-      group.appendChild(handle);
-    });
-  }
-
-  return group;
-}
-
-function renderAnnotations() {
-  const svg = annotationSvg();
-  if (!svg || !cy) return;
-
-  const layer = ensureAnnotationLayer();
-  if (!layer) return;
-
-  // Rebuild only when annotation structure/selection changes, never during
-  // Cytoscape's render loop or every pointermove.
-  layer.replaceChildren();
-  annotationState.items.forEach(item => layer.appendChild(buildAnnotationGroup(item)));
-  updateAnnotationVisuals();
-}
-
-function addTopicArea() {
-  if (!cy) return;
-
-  const extent = cy.extent();
-  const cx = (extent.x1 + extent.x2) / 2;
-  const cyy = (extent.y1 + extent.y2) / 2;
-  const width = Math.max((extent.x2 - extent.x1) * 0.18, 80);
-  const height = Math.max((extent.y2 - extent.y1) * 0.14, 60);
-  const id = `annotation-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-
-  annotationState.items.push({
-    id,
-    label: "Topic area",
-    color: "#f59e0b",
-    showLabel: true,
-    points: [
-      { x: cx - width, y: cyy - height },
-      { x: cx + width, y: cyy - height },
-      { x: cx + width * 1.1, y: cyy + height * 0.55 },
-      { x: cx - width * 0.9, y: cyy + height }
-    ]
-  });
-
-  annotationState.selectedId = id;
-  annotationState.drag = null;
-  saveAnnotations();
-  renderAnnotations();
-  renderAnnotationControls();
-}
-
-function deleteSelectedAnnotation() {
-  if (!annotationState.selectedId) return;
-  annotationState.items = annotationState.items.filter(
-    item => item.id !== annotationState.selectedId
-  );
-  annotationState.selectedId = null;
-  annotationState.drag = null;
-  saveAnnotations();
-  renderAnnotations();
-  renderAnnotationControls();
-}
-
-function clearTopicAreas() {
-  annotationState.items = [];
-  annotationState.selectedId = null;
-  annotationState.drag = null;
-  saveAnnotations();
-  renderAnnotations();
-  renderAnnotationControls();
-}
-
-function addAnnotationCorner(item) {
-  if (!item || item.points.length < 3) return;
-
-  let longest = 0;
-  let longestLength = -Infinity;
-  for (let i = 0; i < item.points.length; i++) {
-    const a = item.points[i];
-    const b = item.points[(i + 1) % item.points.length];
-    const dx = a.x - b.x;
-    const dy = a.y - b.y;
-    const length = dx * dx + dy * dy;
-    if (length > longestLength) {
-      longestLength = length;
-      longest = i;
-    }
-  }
-
-  const a = item.points[longest];
-  const b = item.points[(longest + 1) % item.points.length];
-  item.points.splice(longest + 1, 0, {
-    x: (a.x + b.x) / 2,
-    y: (a.y + b.y) / 2
-  });
-
-  saveAnnotations();
-  renderAnnotations();
-  renderAnnotationControls();
-}
-
-function removeAnnotationCorner(item) {
-  if (!item || item.points.length <= 3) return;
-  item.points.pop();
-  saveAnnotations();
-  renderAnnotations();
-  renderAnnotationControls();
-}
-
-function renderAnnotationControls() {
-  const list = document.getElementById("areaList");
-  if (!list) return;
-  list.innerHTML = "";
-
-  annotationState.items.forEach(item => {
-    const row = document.createElement("div");
-    row.className = "area-item" + (item.id === annotationState.selectedId ? " selected" : "");
-    row.innerHTML = `
-      <input class="area-label" value="${escapeHtml(item.label || "Topic area")}">
-      <input class="area-color" type="color" value="${item.color || "#f59e0b"}">
-      <div class="area-actions">
-        <button class="area-select" type="button">Select</button>
-        <button class="area-add" type="button">＋ Corner</button>
-        <button class="area-remove" type="button" ${item.points.length <= 3 ? "disabled" : ""}>− Corner</button>
-        <button class="area-delete" type="button">Delete</button>
-      </div>
-      <label class="area-show">
-        <input type="checkbox" ${item.showLabel !== false ? "checked" : ""}>
-        Show label
-      </label>
-      <span class="area-count">${item.points.length} corners</span>
-    `;
-
-    row.querySelector(".area-select").onclick = () => {
-      annotationState.selectedId = item.id;
-      renderAnnotations();
-      renderAnnotationControls();
-    };
-    row.querySelector(".area-add").onclick = () => {
-      annotationState.selectedId = item.id;
-      addAnnotationCorner(item);
-    };
-    row.querySelector(".area-remove").onclick = () => {
-      annotationState.selectedId = item.id;
-      removeAnnotationCorner(item);
-    };
-    row.querySelector(".area-delete").onclick = () => {
-      annotationState.items = annotationState.items.filter(x => x.id !== item.id);
-      if (annotationState.selectedId === item.id) annotationState.selectedId = null;
-      annotationState.drag = null;
-      saveAnnotations();
-      renderAnnotations();
-      renderAnnotationControls();
-    };
-    row.querySelector(".area-label").oninput = event => {
-      item.label = event.target.value;
-      saveAnnotations();
-      updateAnnotationVisuals();
-    };
-    row.querySelector(".area-color").oninput = event => {
-      item.color = event.target.value;
-      saveAnnotations();
-      updateAnnotationVisuals();
-      renderAnnotationControls();
-    };
-    row.querySelector(".area-show input").onchange = event => {
-      item.showLabel = event.target.checked;
-      saveAnnotations();
-      renderAnnotations();
-    };
-
-    list.appendChild(row);
-  });
-}
-
-function handleAnnotationPointerMove(event) {
-  const drag = annotationState.drag;
-  if (!drag || !cy) return;
-
-  const point = annotationScreenToGraph(event.clientX, event.clientY);
-
-  if (drag.type === "vertex") {
-    drag.item.points[drag.index] = point;
-  } else if (drag.type === "polygon") {
-    const dx = point.x - drag.start.x;
-    const dy = point.y - drag.start.y;
-    drag.item.points = drag.original.map(original => ({
-      x: original.x + dx,
-      y: original.y + dy
-    }));
-  }
-
-  scheduleAnnotationVisualUpdate();
-}
-
-function handleAnnotationPointerUp() {
-  if (!annotationState.drag) return;
-  annotationState.drag = null;
-  saveAnnotations();
-  renderAnnotations();
-  renderAnnotationControls();
-}
-
-let annotationsInitialized = false;
-
-function initializeAnnotations() {
-  const svg = annotationSvg();
-  if (!svg || !cy || annotationsInitialized) return;
-  annotationsInitialized = true;
-
-  svg.style.pointerEvents = "none";
-  svg.style.position = "absolute";
-  svg.style.inset = "0";
-  svg.style.width = "100%";
-  svg.style.height = "100%";
-  svg.style.zIndex = "4";
-  svg.setAttribute("preserveAspectRatio", "none");
-
-  loadAnnotations();
-  renderAnnotations();
-  renderAnnotationControls();
-
-  document.getElementById("addArea")?.addEventListener("click", addTopicArea);
-  document.getElementById("clearAreas")?.addEventListener("click", clearTopicAreas);
-
-  // These events only reposition existing SVG elements. There is no render
-  // event subscription, so Cytoscape and SVG cannot recursively trigger each other.
-  cy.on("pan zoom resize", scheduleAnnotationVisualUpdate);
-  window.addEventListener("pointermove", handleAnnotationPointerMove, { passive: true });
-  window.addEventListener("pointerup", handleAnnotationPointerUp, { passive: true });
+async function initializeAnnotations(){
+ if(ann.ready)return;ann.ready=true;
+ ann.svg=$("annotationLayer");ann.svg.replaceChildren();
+ ann.root=mk("g",{id:"annRoot"},ann.svg);
+ // transparent catcher used only while drawing (screen space, behind the root group)
+ const catcher=mk("rect",{class:"ann-catcher",x:0,y:0,width:"100%",height:"100%",fill:"transparent"});ann.svg.insertBefore(catcher,ann.root);
+ catcher.addEventListener("click",e=>{
+  if(!ann.draw)return;const p=annToModel(e),pts=ann.draw.points,z=annZoom();
+  if(pts.length>=3&&Math.hypot(p.x-pts[0].x,p.y-pts[0].y)*z<12)return annFinishDraw();
+  const last=pts[pts.length-1];if(last&&Math.hypot(p.x-last.x,p.y-last.y)*z<4)return;
+  pts.push(p);annRenderDraft();
+ });
+ catcher.addEventListener("dblclick",e=>{e.preventDefault();annFinishDraw()});
+ ann.svg.addEventListener("wheel",e=>{ // keep wheel-zoom working over handles / drawing
+  e.preventDefault();const r=ann.svg.getBoundingClientRect();
+  cy.zoom({level:cy.zoom()*Math.exp(-e.deltaY*.0015),renderedPosition:{x:e.clientX-r.left,y:e.clientY-r.top}});
+ },{passive:false});
+ await annLoad();annRender();annList();annHint();
+ $("addArea").onclick=annStartDraw;
+ $("clearAreas").onclick=()=>{if(ann.items.length&&confirm("Delete all annotations?")){ann.items=[];ann.sel=null;annSave();annRender();annList()}};
+ $("exportAreas").onclick=annExport;
+ $("importAreas").onclick=()=>$("importFile").click();
+ $("importFile").onchange=e=>{if(e.target.files[0])annImport(e.target.files[0]);e.target.value=""};
+ cy.on("pan zoom resize",annApplyView);
+ cy.on("tap",e=>{if(e.target===cy&&ann.sel&&!ann.draw)annSelect(null)});
+ window.addEventListener("pointermove",annMove);
+ window.addEventListener("pointerup",annUp);
+ window.addEventListener("keydown",e=>{
+  if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;
+  if(e.key==="Escape"){ann.draw?annCancelDraw():annSelect(null)}
+  else if(e.key==="Enter"&&ann.draw)annFinishDraw();
+  else if((e.key==="Delete"||e.key==="Backspace")&&ann.sel&&ann.selVertex!=null){const a=annSel();if(a)annRemoveCorner(a,ann.selVertex)}
+ });
 }
