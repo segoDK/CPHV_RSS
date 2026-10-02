@@ -95,65 +95,133 @@ init().catch(e=>{console.error(e);$("loading").textContent="Could not load the n
 
 /* ============================================================
    V8 ANNOTATION SYSTEM
-   One authoritative SVG polygon layer, anchored to Cytoscape
-   model coordinates. No window.cy dependency.
+   Single authoritative SVG annotation layer.
+   - Cytoscape owns the map and its pointer interaction.
+   - SVG is a visual overlay and only selected annotation controls
+     receive pointer events.
+   - No render-event feedback loop and no full SVG rebuild during drag.
    ============================================================ */
 const annotationState = {
   items: [],
   selectedId: null,
-  drag: null
+  drag: null,
+  raf: 0
 };
 
-function annotationStorageKey() {
-  return "semantic-network-explorer-annotations-v8";
-}
-
-function loadAnnotations() {
-  try {
-    const current = JSON.parse(localStorage.getItem(annotationStorageKey()) || "null");
-    if (Array.isArray(current)) {
-      annotationState.items = current.filter(item => Array.isArray(item.points) && item.points.length >= 3);
-      return;
-    }
-
-    // One-time migration from the pre-V8 storage format.
-    const legacy = JSON.parse(localStorage.getItem("semanticAreas") || "[]");
-    annotationState.items = Array.isArray(legacy)
-      ? legacy.filter(item => Array.isArray(item.points) && item.points.length >= 3)
-      : [];
-
-    if (annotationState.items.length) {
-      saveAnnotations();
-      localStorage.removeItem("semanticAreas");
-    }
-  } catch (e) {
-    annotationState.items = [];
-  }
-}
-
-function saveAnnotations() {
-  localStorage.setItem(
-    annotationStorageKey(),
-    JSON.stringify(annotationState.items)
-  );
-}
+const ANNOTATION_STORAGE_KEY = "semantic-network-explorer-annotations-v8";
+const SVG_NS = "http://www.w3.org/2000/svg";
 
 function annotationSvg() {
   return document.getElementById("annotationLayer");
 }
 
+function annotationStorageKey() {
+  return ANNOTATION_STORAGE_KEY;
+}
+
+function finiteNumber(v) {
+  return Number.isFinite(Number(v));
+}
+
+function normalizeAnnotation(item, index = 0) {
+  if (!item || !Array.isArray(item.points) || item.points.length < 3) return null;
+
+  const points = item.points.map(p => ({
+    x: Number(p?.x),
+    y: Number(p?.y)
+  }));
+
+  if (!points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y))) return null;
+
+  return {
+    id: String(item.id || `annotation-${Date.now()}-${index}`),
+    label: String(item.label ?? "Topic area"),
+    color: /^#[0-9a-f]{6}$/i.test(String(item.color || "")) ? String(item.color) : "#f59e0b",
+    showLabel: item.showLabel !== false,
+    points
+  };
+}
+
+function loadAnnotations() {
+  annotationState.items = [];
+  annotationState.selectedId = null;
+
+  try {
+    let raw = localStorage.getItem(annotationStorageKey());
+    let sourceKey = annotationStorageKey();
+
+    if (!raw) {
+      raw = localStorage.getItem("semanticAreas");
+      sourceKey = "semanticAreas";
+    }
+
+    if (!raw) return;
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+
+    annotationState.items = parsed
+      .map((item, index) => normalizeAnnotation(item, index))
+      .filter(Boolean);
+
+    // Persist the validated V8 representation and retire the legacy key.
+    saveAnnotations();
+    if (sourceKey === "semanticAreas") localStorage.removeItem("semanticAreas");
+  } catch (error) {
+    // A bad annotation must never prevent the network from loading.
+    annotationState.items = [];
+    annotationState.selectedId = null;
+    try {
+      localStorage.removeItem(annotationStorageKey());
+      localStorage.removeItem("semanticAreas");
+    } catch (_) {}
+  }
+}
+
+function saveAnnotations() {
+  try {
+    const safe = annotationState.items
+      .map((item, index) => normalizeAnnotation(item, index))
+      .filter(Boolean);
+    annotationState.items = safe;
+    localStorage.setItem(annotationStorageKey(), JSON.stringify(safe));
+  } catch (error) {
+    console.warn("Could not save annotations", error);
+  }
+}
+
+function annotationCentre(item) {
+  let sx = 0;
+  let sy = 0;
+  item.points.forEach(p => {
+    sx += p.x;
+    sy += p.y;
+  });
+  return {
+    x: sx / item.points.length,
+    y: sy / item.points.length
+  };
+}
+
 function graphToAnnotationScreen(point) {
-  const rendered = cy.renderedPosition({ x: point.x, y: point.y });
-  return { x: rendered.x, y: rendered.y };
+  if (!cy) return { x: 0, y: 0 };
+  const pan = cy.pan();
+  const zoom = cy.zoom();
+  return {
+    x: Number(point.x) * zoom + pan.x,
+    y: Number(point.y) * zoom + pan.y
+  };
 }
 
 function annotationScreenToGraph(clientX, clientY) {
   const svg = annotationSvg();
+  if (!svg || !cy) return { x: 0, y: 0 };
+
   const rect = svg.getBoundingClientRect();
   const renderedX = clientX - rect.left;
   const renderedY = clientY - rect.top;
   const pan = cy.pan();
-  const zoom = cy.zoom();
+  const zoom = cy.zoom() || 1;
 
   return {
     x: (renderedX - pan.x) / zoom,
@@ -162,9 +230,9 @@ function annotationScreenToGraph(clientX, clientY) {
 }
 
 function annotationPointString(points) {
-  return points.map(p => {
-    const q = graphToAnnotationScreen(p);
-    return `${q.x},${q.y}`;
+  return points.map(point => {
+    const p = graphToAnnotationScreen(point);
+    return `${p.x},${p.y}`;
   }).join(" ");
 }
 
@@ -174,142 +242,184 @@ function selectedAnnotation() {
   ) || null;
 }
 
-function annotationCentre(item) {
-  const sum = item.points.reduce(
-    (acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }),
-    { x: 0, y: 0 }
-  );
-  return {
-    x: sum.x / item.points.length,
-    y: sum.y / item.points.length
+function ensureAnnotationLayer() {
+  const svg = annotationSvg();
+  if (!svg) return null;
+
+  let layer = svg.querySelector(".annotation-layer");
+  if (!layer) {
+    layer = document.createElementNS(SVG_NS, "g");
+    layer.setAttribute("class", "annotation-layer");
+    svg.appendChild(layer);
+  }
+  return layer;
+}
+
+function makeSvg(tag, attrs = {}) {
+  const el = document.createElementNS(SVG_NS, tag);
+  Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+  return el;
+}
+
+function updateAnnotationVisual(item, group) {
+  const polygon = group.querySelector(".annotation-polygon");
+  if (polygon) {
+    polygon.setAttribute("points", annotationPointString(item.points));
+    polygon.setAttribute("fill", item.color);
+    polygon.setAttribute("stroke", item.color);
+    polygon.setAttribute(
+      "fill-opacity",
+      item.id === annotationState.selectedId ? "0.22" : "0.12"
+    );
+    polygon.setAttribute(
+      "stroke-width",
+      item.id === annotationState.selectedId ? "3" : "2"
+    );
+  }
+
+  const centre = graphToAnnotationScreen(annotationCentre(item));
+  const label = group.querySelector(".annotation-label");
+  if (label) {
+    label.setAttribute("x", centre.x);
+    label.setAttribute("y", centre.y);
+    label.setAttribute("fill", item.color);
+    label.textContent = item.label || "Topic area";
+  }
+
+  group.querySelectorAll(".annotation-handle").forEach((handle, index) => {
+    const point = item.points[index];
+    if (!point) return;
+    const screen = graphToAnnotationScreen(point);
+    handle.setAttribute("cx", screen.x);
+    handle.setAttribute("cy", screen.y);
+    handle.setAttribute("stroke", item.color);
+  });
+}
+
+function scheduleAnnotationVisualUpdate() {
+  if (annotationState.raf) return;
+  annotationState.raf = requestAnimationFrame(() => {
+    annotationState.raf = 0;
+    updateAnnotationVisuals();
+  });
+}
+
+function updateAnnotationVisuals() {
+  const layer = ensureAnnotationLayer();
+  if (!layer || !cy) return;
+
+  const groups = layer.querySelectorAll(".annotation-group");
+  groups.forEach(group => {
+    const item = annotationState.items.find(
+      candidate => candidate.id === group.dataset.annotationId
+    );
+    if (item) updateAnnotationVisual(item, group);
+  });
+}
+
+function beginPolygonDrag(event, item, polygon) {
+  if (event.button !== 0) return;
+
+  annotationState.selectedId = item.id;
+  annotationState.drag = {
+    type: "polygon",
+    item,
+    start: annotationScreenToGraph(event.clientX, event.clientY),
+    original: item.points.map(p => ({ ...p }))
   };
+
+  try { polygon.setPointerCapture(event.pointerId); } catch (_) {}
+  event.preventDefault();
+  event.stopPropagation();
+  renderAnnotationControls();
+  updateAnnotationVisuals();
+}
+
+function beginVertexDrag(event, item, index, handle) {
+  if (event.button !== 0) return;
+
+  annotationState.selectedId = item.id;
+  annotationState.drag = {
+    type: "vertex",
+    item,
+    index
+  };
+
+  try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+  event.preventDefault();
+  event.stopPropagation();
+  renderAnnotationControls();
+}
+
+function buildAnnotationGroup(item) {
+  const group = makeSvg("g", {
+    class: "annotation-group",
+    "data-annotation-id": item.id
+  });
+
+  const polygon = makeSvg("polygon", {
+    class: "annotation-polygon",
+    points: annotationPointString(item.points),
+    fill: item.color,
+    "fill-opacity": item.id === annotationState.selectedId ? "0.22" : "0.12",
+    stroke: item.color,
+    "stroke-width": item.id === annotationState.selectedId ? "3" : "2",
+    "stroke-dasharray": "7 5"
+  });
+
+  // Keep polygon interaction deliberately narrow. The map remains usable
+  // everywhere outside an actively selected annotation.
+  polygon.style.pointerEvents = item.id === annotationState.selectedId ? "auto" : "none";
+  polygon.style.cursor = "move";
+  polygon.addEventListener("pointerdown", event => beginPolygonDrag(event, item, polygon));
+  group.appendChild(polygon);
+
+  if (item.showLabel !== false) {
+    const centre = graphToAnnotationScreen(annotationCentre(item));
+    const text = makeSvg("text", {
+      class: "annotation-label",
+      x: centre.x,
+      y: centre.y,
+      "text-anchor": "middle",
+      "dominant-baseline": "middle"
+    });
+    text.textContent = item.label || "Topic area";
+    group.appendChild(text);
+  }
+
+  if (item.id === annotationState.selectedId) {
+    item.points.forEach((point, index) => {
+      const screen = graphToAnnotationScreen(point);
+      const handle = makeSvg("circle", {
+        class: "annotation-handle",
+        cx: screen.x,
+        cy: screen.y,
+        r: "7",
+        fill: "#ffffff",
+        stroke: item.color,
+        "stroke-width": "3"
+      });
+      handle.style.pointerEvents = "auto";
+      handle.addEventListener("pointerdown", event => beginVertexDrag(event, item, index, handle));
+      group.appendChild(handle);
+    });
+  }
+
+  return group;
 }
 
 function renderAnnotations() {
   const svg = annotationSvg();
   if (!svg || !cy) return;
 
-  let layer = svg.querySelector(".annotation-layer");
-  if (!layer) {
-    layer = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    layer.setAttribute("class", "annotation-layer");
-    svg.appendChild(layer);
-  }
+  const layer = ensureAnnotationLayer();
+  if (!layer) return;
 
-  layer.innerHTML = "";
-
-  annotationState.items.forEach(item => {
-    const group = document.createElementNS(
-      "http://www.w3.org/2000/svg", "g"
-    );
-    group.dataset.annotationId = item.id;
-
-    const polygon = document.createElementNS(
-      "http://www.w3.org/2000/svg", "polygon"
-    );
-
-    polygon.setAttribute("points", annotationPointString(item.points));
-    polygon.setAttribute("fill", item.color);
-    polygon.setAttribute(
-      "fill-opacity",
-      item.id === annotationState.selectedId ? "0.22" : "0.12"
-    );
-    polygon.setAttribute("stroke", item.color);
-    polygon.setAttribute(
-      "stroke-width",
-      item.id === annotationState.selectedId ? "3" : "2"
-    );
-    polygon.setAttribute("stroke-dasharray", "7 5");
-    polygon.style.pointerEvents = "auto";
-    polygon.style.cursor = "move";
-
-    polygon.addEventListener("pointerdown", event => {
-      if (event.button !== 0) return;
-
-      annotationState.selectedId = item.id;
-
-      const start = annotationScreenToGraph(
-        event.clientX,
-        event.clientY
-      );
-
-      annotationState.drag = {
-        type: "polygon",
-        item,
-        start,
-        original: item.points.map(p => ({ ...p }))
-      };
-
-      polygon.setPointerCapture?.(event.pointerId);
-      event.preventDefault();
-      event.stopPropagation();
-      renderAnnotations();
-      renderAnnotationControls();
-    });
-
-    group.appendChild(polygon);
-
-    if (item.showLabel !== false) {
-      const centre = annotationCentre(item);
-      const screen = graphToAnnotationScreen(centre);
-
-      const text = document.createElementNS(
-        "http://www.w3.org/2000/svg", "text"
-      );
-
-      text.setAttribute("x", screen.x);
-      text.setAttribute("y", screen.y);
-      text.setAttribute("text-anchor", "middle");
-      text.setAttribute("dominant-baseline", "middle");
-      text.setAttribute("font-size", "14");
-      text.setAttribute("font-weight", "700");
-      text.setAttribute("fill", item.color);
-      text.setAttribute("stroke", "#ffffff");
-      text.setAttribute("stroke-width", "4");
-      text.setAttribute("paint-order", "stroke");
-      text.style.pointerEvents = "none";
-      text.textContent = item.label || "Topic area";
-
-      group.appendChild(text);
-    }
-
-    if (item.id === annotationState.selectedId) {
-      item.points.forEach((point, index) => {
-        const screen = graphToAnnotationScreen(point);
-
-        const handle = document.createElementNS(
-          "http://www.w3.org/2000/svg", "circle"
-        );
-
-        handle.setAttribute("cx", screen.x);
-        handle.setAttribute("cy", screen.y);
-        handle.setAttribute("r", "7");
-        handle.setAttribute("fill", "#ffffff");
-        handle.setAttribute("stroke", item.color);
-        handle.setAttribute("stroke-width", "3");
-        handle.style.pointerEvents = "auto";
-        handle.style.cursor = "grab";
-
-        handle.addEventListener("pointerdown", event => {
-          if (event.button !== 0) return;
-
-          annotationState.selectedId = item.id;
-          annotationState.drag = {
-            type: "vertex",
-            item,
-            index
-          };
-
-          event.preventDefault();
-          event.stopPropagation();
-        });
-
-        group.appendChild(handle);
-      });
-    }
-
-    layer.appendChild(group);
-  });
+  // Rebuild only when annotation structure/selection changes, never during
+  // Cytoscape's render loop or every pointermove.
+  layer.replaceChildren();
+  annotationState.items.forEach(item => layer.appendChild(buildAnnotationGroup(item)));
+  updateAnnotationVisuals();
 }
 
 function addTopicArea() {
@@ -318,11 +428,9 @@ function addTopicArea() {
   const extent = cy.extent();
   const cx = (extent.x1 + extent.x2) / 2;
   const cyy = (extent.y1 + extent.y2) / 2;
-
   const width = Math.max((extent.x2 - extent.x1) * 0.18, 80);
   const height = Math.max((extent.y2 - extent.y1) * 0.14, 60);
-
-  const id = "annotation-" + Date.now();
+  const id = `annotation-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
   annotationState.items.push({
     id,
@@ -338,6 +446,7 @@ function addTopicArea() {
   });
 
   annotationState.selectedId = id;
+  annotationState.drag = null;
   saveAnnotations();
   renderAnnotations();
   renderAnnotationControls();
@@ -345,14 +454,11 @@ function addTopicArea() {
 
 function deleteSelectedAnnotation() {
   if (!annotationState.selectedId) return;
-
   annotationState.items = annotationState.items.filter(
     item => item.id !== annotationState.selectedId
   );
-
   annotationState.selectedId = null;
   annotationState.drag = null;
-
   saveAnnotations();
   renderAnnotations();
   renderAnnotationControls();
@@ -362,25 +468,22 @@ function clearTopicAreas() {
   annotationState.items = [];
   annotationState.selectedId = null;
   annotationState.drag = null;
-
   saveAnnotations();
   renderAnnotations();
   renderAnnotationControls();
 }
 
 function addAnnotationCorner(item) {
-  if (!item) return;
+  if (!item || item.points.length < 3) return;
 
   let longest = 0;
   let longestLength = -Infinity;
-
   for (let i = 0; i < item.points.length; i++) {
     const a = item.points[i];
     const b = item.points[(i + 1) % item.points.length];
     const dx = a.x - b.x;
     const dy = a.y - b.y;
     const length = dx * dx + dy * dy;
-
     if (length > longestLength) {
       longestLength = length;
       longest = i;
@@ -389,7 +492,6 @@ function addAnnotationCorner(item) {
 
   const a = item.points[longest];
   const b = item.points[(longest + 1) % item.points.length];
-
   item.points.splice(longest + 1, 0, {
     x: (a.x + b.x) / 2,
     y: (a.y + b.y) / 2
@@ -402,9 +504,7 @@ function addAnnotationCorner(item) {
 
 function removeAnnotationCorner(item) {
   if (!item || item.points.length <= 3) return;
-
   item.points.pop();
-
   saveAnnotations();
   renderAnnotations();
   renderAnnotationControls();
@@ -413,23 +513,19 @@ function removeAnnotationCorner(item) {
 function renderAnnotationControls() {
   const list = document.getElementById("areaList");
   if (!list) return;
-
   list.innerHTML = "";
 
   annotationState.items.forEach(item => {
     const row = document.createElement("div");
-    row.className =
-      "area-item" +
-      (item.id === annotationState.selectedId ? " selected" : "");
-
+    row.className = "area-item" + (item.id === annotationState.selectedId ? " selected" : "");
     row.innerHTML = `
       <input class="area-label" value="${escapeHtml(item.label || "Topic area")}">
       <input class="area-color" type="color" value="${item.color || "#f59e0b"}">
       <div class="area-actions">
-        <button class="area-select">Select</button>
-        <button class="area-add">＋ Corner</button>
-        <button class="area-remove">− Corner</button>
-        <button class="area-delete">Delete</button>
+        <button class="area-select" type="button">Select</button>
+        <button class="area-add" type="button">＋ Corner</button>
+        <button class="area-remove" type="button" ${item.points.length <= 3 ? "disabled" : ""}>− Corner</button>
+        <button class="area-delete" type="button">Delete</button>
       </div>
       <label class="area-show">
         <input type="checkbox" ${item.showLabel !== false ? "checked" : ""}>
@@ -443,43 +539,33 @@ function renderAnnotationControls() {
       renderAnnotations();
       renderAnnotationControls();
     };
-
     row.querySelector(".area-add").onclick = () => {
       annotationState.selectedId = item.id;
       addAnnotationCorner(item);
     };
-
     row.querySelector(".area-remove").onclick = () => {
       annotationState.selectedId = item.id;
       removeAnnotationCorner(item);
     };
-
     row.querySelector(".area-delete").onclick = () => {
-      annotationState.items = annotationState.items.filter(
-        x => x.id !== item.id
-      );
-
-      if (annotationState.selectedId === item.id) {
-        annotationState.selectedId = null;
-      }
-
+      annotationState.items = annotationState.items.filter(x => x.id !== item.id);
+      if (annotationState.selectedId === item.id) annotationState.selectedId = null;
+      annotationState.drag = null;
       saveAnnotations();
       renderAnnotations();
       renderAnnotationControls();
     };
-
     row.querySelector(".area-label").oninput = event => {
       item.label = event.target.value;
       saveAnnotations();
-      renderAnnotations();
+      updateAnnotationVisuals();
     };
-
     row.querySelector(".area-color").oninput = event => {
       item.color = event.target.value;
       saveAnnotations();
-      renderAnnotations();
+      updateAnnotationVisuals();
+      renderAnnotationControls();
     };
-
     row.querySelector(".area-show input").onchange = event => {
       item.showLabel = event.target.checked;
       saveAnnotations();
@@ -490,48 +576,38 @@ function renderAnnotationControls() {
   });
 }
 
-document.addEventListener("pointermove", event => {
+function handleAnnotationPointerMove(event) {
   const drag = annotationState.drag;
   if (!drag || !cy) return;
 
-  if (drag.type === "vertex") {
-    const point = annotationScreenToGraph(
-      event.clientX,
-      event.clientY
-    );
+  const point = annotationScreenToGraph(event.clientX, event.clientY);
 
+  if (drag.type === "vertex") {
     drag.item.points[drag.index] = point;
   } else if (drag.type === "polygon") {
-    const current = annotationScreenToGraph(
-      event.clientX,
-      event.clientY
-    );
-
-    const dx = current.x - drag.start.x;
-    const dy = current.y - drag.start.y;
-
-    drag.item.points = drag.original.map(point => ({
-      x: point.x + dx,
-      y: point.y + dy
+    const dx = point.x - drag.start.x;
+    const dy = point.y - drag.start.y;
+    drag.item.points = drag.original.map(original => ({
+      x: original.x + dx,
+      y: original.y + dy
     }));
   }
 
-  renderAnnotations();
-});
+  scheduleAnnotationVisualUpdate();
+}
 
-document.addEventListener("pointerup", () => {
+function handleAnnotationPointerUp() {
   if (!annotationState.drag) return;
-
   annotationState.drag = null;
   saveAnnotations();
   renderAnnotations();
   renderAnnotationControls();
-});
+}
 
 let annotationsInitialized = false;
 
 function initializeAnnotations() {
-  const svg = document.getElementById("annotationLayer");
+  const svg = annotationSvg();
   if (!svg || !cy || annotationsInitialized) return;
   annotationsInitialized = true;
 
@@ -541,21 +617,18 @@ function initializeAnnotations() {
   svg.style.width = "100%";
   svg.style.height = "100%";
   svg.style.zIndex = "4";
+  svg.setAttribute("preserveAspectRatio", "none");
 
   loadAnnotations();
   renderAnnotations();
   renderAnnotationControls();
 
-  document.getElementById("addArea")?.addEventListener(
-    "click",
-    addTopicArea
-  );
+  document.getElementById("addArea")?.addEventListener("click", addTopicArea);
+  document.getElementById("clearAreas")?.addEventListener("click", clearTopicAreas);
 
-  document.getElementById("clearAreas")?.addEventListener(
-    "click",
-    clearTopicAreas
-  );
-
-  cy.on("pan zoom resize render", renderAnnotations);
+  // These events only reposition existing SVG elements. There is no render
+  // event subscription, so Cytoscape and SVG cannot recursively trigger each other.
+  cy.on("pan zoom resize", scheduleAnnotationVisualUpdate);
+  window.addEventListener("pointermove", handleAnnotationPointerMove, { passive: true });
+  window.addEventListener("pointerup", handleAnnotationPointerUp, { passive: true });
 }
-

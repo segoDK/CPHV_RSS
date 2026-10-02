@@ -9,7 +9,7 @@
   overflow: visible;
 }
 .annotation-layer { pointer-events: none; }
-.annotation-group { pointer-events: auto; cursor: grab; }
+.annotation-group { pointer-events: none; cursor: default; }
 .annotation-group:active { cursor: grabbing; }
 .annotation-polygon {
   pointer-events: all;

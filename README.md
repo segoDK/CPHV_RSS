@@ -1,6 +1,6 @@
-# Semantic Network Explorer V8
+# Semantic Network Explorer V8.1
 
-# Semantic Network Explorer V8
+# Semantic Network Explorer V8.1
 
 Interactive semantic-network explorer using the corrected GraphML.
 
@@ -56,7 +56,7 @@ Topic areas are free-form polygons anchored to the network coordinate system.
 - Annotation geometry is stored in the browser's local storage and follows the network when it is panned or zoomed.
 
 
-## V8 annotation system
+## V8.1 annotation system
 
 The annotation feature uses one integrated SVG polygon layer tied directly to the Cytoscape graph coordinate system.
 
@@ -70,3 +70,11 @@ The annotation feature uses one integrated SVG polygon layer tied directly to th
 - Delete individual areas or clear all areas.
 - Areas remain attached to the network while panning and zooming.
 - Annotation data is stored locally in the browser.
+
+
+## V8.1 interaction fix
+
+The annotation layer no longer calls `cy.renderedPosition()`. Annotation coordinates
+are transformed using the Cytoscape core's pan and zoom values, while ordinary
+Cytoscape rendering is left untouched. The annotation SVG only accepts pointer
+events on actual polygon and corner shapes.
